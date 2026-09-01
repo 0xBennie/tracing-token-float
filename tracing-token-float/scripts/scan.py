@@ -140,13 +140,14 @@ def main():
         print(f"  {pa}")
         print(f"     price ${pool.price:.6f}   reserves {pool.reserve0:,.0f} tok / "
               f"${pool.reserve1:,.0f} quote   self-check ok={pool.check['ok']}")
-        print(f"     {'sell':>13} {'fillable':>13} {'proceeds':>12} {'avg':>10} {'after':>12} {'drop':>8}")
+        print(f"     {'sell':>13} {'fillable':>13} {'proceeds':>12} {'avg':>10} "
+              f"{'after':>11} {'drop':>7}  stop")
         for s in (10_000, 100_000, 1_000_000):
             r = pool.sell(s)
-            tag = "  (partial)" if r["partial"] else ""
             print(f"     {s:>13,} {r['filled']:>13,.0f} {r['proceeds']:>12,.0f} "
-                  f"{r['avg']:>10.4f} {r['end_price']:>12.6f} {r['drawdown_pct']:>7.1f}%{tag}")
-        print(f"     drains at {drain['filled']:,.0f} tokens for ${drain['proceeds']:,.0f}\n")
+                  f"{r['avg']:>10.4f} {r['end_price']:>11.6f} {r['drawdown_pct']:>6.1f}%  {r['stop']}")
+        print(f"     book absorbs {drain['filled']:,.0f} tokens in total, paying ${drain['proceeds']:,.0f}")
+        print(f"     (a full fill is not a good fill — watch the average, not the stop reason)\n")
 
     out["reachable_usd"], out["displayed_tvl_usd"] = reachable, tvl
 

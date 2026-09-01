@@ -160,7 +160,23 @@ Test the prefix: 23 bytes beginning `0xef0100` is a delegated **EOA**, not a con
 The same tell identifies batch tooling — many claimers delegating to one implementation
 is a sybil signal, not a diversity signal.
 
-## 16. Holder count is not dispersion
+## 16. A full fill is not a good fill
+
+Below the current price a V3 book keeps absorbing token0 all the way down — as the price
+approaches zero the quantity it will take is unbounded. So a sell that "completes" proves
+nothing: dumping 10M tokens into a pool holding $36k of quote fills 100%, pays $36k, and
+lands at an average of a third of a cent.
+
+Report the stop reason alongside the fill, and read the **average price**, never the fill
+ratio. Three outcomes look identical in a fill column and mean completely different
+things: filled at a fair price, filled at a catastrophic price, and could not fill.
+
+The related mis-accounting: when proceeds hit the pool's quote balance, solve for the
+price where cumulative output equals that balance. Truncating the total afterwards
+reports the whole requested size as filled while paying a capped amount — an average
+price nobody could ever have gotten.
+
+## 17. Holder count is not dispersion
 
 Neither a large holder count nor a small one tells you the float is dispersed. Two
 distinct populations both inflate it and neither is a retail holder:

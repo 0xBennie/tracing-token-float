@@ -127,10 +127,22 @@ class Pool:
                     ticks=len(self.ticks))
 
     def sell(self, amount0):
-        """Sell `amount0` of token0. Reports what is ACTUALLY fillable, not what was asked."""
-        rem, out = amount0 * 10 ** self.d0, 0.0
+        """Sell `amount0` of token0. Reports what is ACTUALLY fillable, not what was asked.
+
+        Two independent stops, and both must reduce the reported fill:
+          - liquidity exhausted: below the lowest initialised tick there are no bids
+          - quote exhausted: proceeds can never exceed the pool's token1 balance
+
+        On the quote stop, solve for the price where cumulative output equals the
+        balance rather than truncating the total afterwards. Truncating reports the
+        full requested size as filled while paying out a capped amount — an average
+        price that no one could ever get.
+        """
+        total = amount0 * 10 ** self.d0
+        rem, out = total, 0.0
         sqrtP, L, f = self.sqrtP, float(self.L0), self.fee / 1e6
         cap = self.reserve1 * 10 ** self.d1
+        capped = False
         for t in sorted((t for t in self.ticks if t <= self.tick), reverse=True):
             if rem <= 0:
                 break
@@ -139,28 +151,31 @@ class Pool:
                 L -= self.net[t]
                 continue
             if L > 0:
-                dx = L * (1 / sn - 1 / sqrtP)
                 after_fee = rem * (1 - f)
-                if after_fee < dx:                        # fills inside this segment
-                    end = 1 / (1 / sqrtP + after_fee / L)
-                    out += L * (sqrtP - end)
+                dx = L * (1 / sn - 1 / sqrtP)
+                end = 1 / (1 / sqrtP + after_fee / L) if after_fee < dx else sn
+                seg = L * (sqrtP - end)
+                if out + seg >= cap:                      # quote runs out inside this step
+                    end = sqrtP - (cap - out) / L
+                    rem -= L * (1 / end - 1 / sqrtP) / (1 - f)
+                    out, sqrtP, capped = cap, end, True
+                    break
+                out += seg
+                if after_fee < dx:                        # order fills inside this step
                     sqrtP, rem = end, 0
                     break
-                out += L * (sqrtP - sn)
                 rem -= dx / (1 - f)
             sqrtP = sn
             L -= self.net[t]
-            if out >= cap:                                # quote currency exhausted
-                rem = 0
-                break
-        out = min(out, cap)
-        filled = (amount0 * 10 ** self.d0 - max(rem, 0)) / 10 ** self.d0
+        filled = (total - max(rem, 0)) / 10 ** self.d0
         proceeds = out / 10 ** self.d1
         end_px = sqrtP ** 2 * 10 ** (self.d0 - self.d1)
         return dict(requested=amount0, filled=filled, proceeds=proceeds,
                     avg=proceeds / filled if filled else 0.0, end_price=end_px,
                     drawdown_pct=(end_px / self.price - 1) * 100,
-                    partial=filled < amount0 * 0.999)
+                    partial=filled < amount0 * 0.999,
+                    stop="quote exhausted" if capped
+                         else ("liquidity exhausted" if rem > 0 else "filled"))
 
     def curve(self, sizes):
         return [self.sell(s) for s in sizes]
