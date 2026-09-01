@@ -13,6 +13,38 @@ You have a token. The team published a tokenomics table. You want to know what t
 - How much of an airdrop went to a sybil farm rather than to users
 - **What the position is actually worth if it hits the book** — usually the number that reframes everything else
 
+## Start here
+
+```bash
+python scripts/scan.py --chain base --token 0xABC... \
+       --also-audit 0xBRIDGE_ADAPTER... --holdings 100000000
+```
+
+Minutes, no database, three numbers that change a decision:
+
+```
+[1] PRIVILEGES — can they print, freeze, or drain?
+    !! [escape] sweep(address)   OWNER-ONLY (stranger refused: OwnableUnauthorizedAccount)
+    -> LIVE escape hatch — held balances can be withdrawn unilaterally, no delay
+    -> owner is a Safe 4/6: 4 signatures move it
+
+[2] EXIT LIQUIDITY
+             sell      fillable     proceeds      after     drop
+        1,000,000       233,366     $125,823   0.040460   -92.8%  (partial)
+
+[3] VERDICT
+    displayed liquidity (TVL style)   $2,304,320
+    actually reachable by selling     $125,823   (18.3x overstated)
+    position at mark price            $61,959,700
+    paper : reachable                 492 : 1
+```
+
+Run this before the full method below — either answer can make the rest academic.
+
+**It deliberately does not compute "the team controls X% of float."** That number is
+expensive, mostly restates the published allocation table, and is the same decision at
+across the plausible range. The layers below are there when you need it anyway.
+
 ## The layers
 
 Bottom-up. Each layer is void if the one below it didn't pass its gate.
@@ -35,9 +67,11 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             13 traps that corrupt results while every number still looks fine
+    pitfalls.md             16 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
+    scan.py                 the three-number pass — start here
+    privileges.py           selector extraction from bytecode + live-control proof
     rpc.py                  rotating multi-endpoint JSON-RPC, batching, signed-word decode
     replay.py               event replay into SQLite + the supply-identity gate
     lineage.py              weighted provenance, net-flow, first-funder
@@ -78,11 +112,24 @@ Every entry in `references/pitfalls.md` is a mistake that produces a plausible-l
 - Treating a pool's token balance as the issuer's LP position, attributing every third-party LP to them
 - Reading pool state across blocks while a JIT vault churns, so liquidity and ticks describe different states
 - Weighted lineage on a high-frequency address, where its own churn dilutes provenance to noise
+- Auditing the token contract and stopping there, while the bridge adapter holding the
+  remote chain's entire collateral carries a non-standard `sweep()`
 - A mixed numerator and denominator — the one that produces impressive, meaningless percentages
 
 ## Provenance
 
-Distilled from a full two-chain float audit: ~4.7M Transfer events replayed across Base and BNB Chain, attribution closed exactly onto the float, then cross-examined by independent agents per layer with adversarial reviewers assigned to refute the disputed findings rather than confirm them. Every trap listed was hit and fixed during that work.
+Distilled from a full two-chain float audit: ~4.7M Transfer events replayed across Base
+and BNB Chain, attribution closed exactly onto the float, then cross-examined by 25
+independent agents — one per layer, with adversaries assigned to *refute* the disputed
+findings rather than confirm them. Every trap listed was hit during that work.
+
+The review overturned three of the original report's headline claims, including a
+realized-proceeds figure that was wrong by 40x in the direction of accusing the issuer.
+It also found what none of the flow analysis had: a live `sweep()` on the bridge adapter
+putting the entire remote-chain supply at the discretion of a 4/6 multisig.
+
+That is why `scan.py` leads with privileges rather than percentages. The forensics were
+worth far less than the two contract reads.
 
 ## License
 

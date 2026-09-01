@@ -23,16 +23,28 @@ The single most common failure is not a wrong number, it's a **mixed denominator
 
 **Not for:** price prediction, TA, or any question that doesn't reduce to "who holds what, and can they sell it."
 
-## Before Anything: can they just mint more?
+## Start Here
 
-Read the token contract before you replay a single event. If there is a `mint`, `pause`,
-or `blacklist` path outside the bridge logic — or the contract is a proxy whose admin can
-add one — then "who controls the float" is the wrong question: they don't need to control
-existing supply, they can print. Check `owner()`, the EIP-1967 admin slot, and every
-privileged function; name who holds each.
+```bash
+python scripts/scan.py --chain base --token 0xABC... \
+       --also-audit 0xBRIDGE_ADAPTER... --holdings 100000000
+```
 
-This also decides whether `totalSupply()` is an invariant you may build identity checks
-on. If it isn't, every gate below needs to account for supply changes explicitly.
+Three numbers, minutes, no database: can they print/freeze/drain, how much the book
+actually absorbs, and what the position is worth against that. Run it before committing
+to the full method below — either answer can make the rest academic.
+
+**Audit every contract that holds or moves the token, not just the token.** Bridge
+adapters, vesting factories, distributors, staking pools. The token itself is the
+contract everyone reads and therefore the least likely place to find anything; the
+escrow nobody thinks to open is where a `sweep()` lives. `scripts/privileges.py`
+extracts every selector the runtime bytecode dispatches and flags the ones granting
+unilateral control — then proves each one live by showing a stranger refused with an
+auth error where the owner is not.
+
+If a mint path exists outside the bridge logic, "who controls the float" is the wrong
+question — they can print. This also decides whether `totalSupply()` is an invariant the
+identity gates below may rest on.
 
 ## The Chain
 
@@ -96,7 +108,7 @@ Then state the ratio plainly: **controlled position at mark price, versus total 
 
 For concentrated-liquidity math and the depth simulator: [references/v3-depth.md](references/v3-depth.md).
 
-Reusable tools: [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (event replay → SQLite + identity self-check), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator + reserve self-check).
+Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (event replay → SQLite + identity self-check), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator + reserve self-check).
 
 ## Common Mistakes
 

@@ -124,7 +124,33 @@ the same state, or the reserve self-check compares two different pools.
 
 Rotate endpoints and retry. Batch JSON-RPC arrays above ~120 items get rejected outright by most public nodes, and some free tiers cap batches far lower (drpc: 3) — detect that error and drop the endpoint from your batch rotation rather than failing the run. Cache `tickBitmap` words and `ticks` results; a naive tick walk re-fetches the same words thousands of times and will time out.
 
-## 14. `getCode != "0x"` misclassifies EIP-7702 accounts
+## 14. Auditing the token and stopping there
+
+The token contract is the one everybody reads, so it is the least rewarding place to
+look. The unilateral control paths live in the contracts around it — the bridge adapter
+holding cross-chain collateral, the vesting factory, the airdrop distributor, the staking
+pool.
+
+A real case: a token contract with no owner, no mint, no pause, not a proxy — genuinely
+clean, and the whole analysis treated the supply as fixed. Its LayerZero OFT adapter,
+holding 20M tokens of collateral backing the entire remote chain, carried a
+**non-standard `sweep(address)`** transferring `balanceOf(this)` in full to the owner —
+a 4/6 multisig. Every token on the remote chain was unbacked on demand, with no timelock.
+Nothing in the transfer graph would ever have shown this. It is only visible by reading
+the adapter's runtime bytecode.
+
+Two habits: enumerate selectors from the **bytecode**, not from a source skim (the
+dangerous function is the one that isn't in the standard interface you're pattern-matching
+against); and prove a privileged path is *live* rather than merely present.
+
+**Do not test liveness by success.** A privileged function usually still reverts for the
+owner under `eth_call` — a later precondition, a zero-value transfer. Compare *revert
+payloads* instead: a stranger gets `OwnableUnauthorizedAccount` (`0x118cdaa7`) or
+`AccessControlUnauthorizedAccount` (`0xe2517d3f`), the owner gets something else or
+nothing. Different failures prove the gate exists and that the owner is past it. Always
+run a garbage selector as a control, or a fallback-everything contract reads as a hit.
+
+## 15. `getCode != "0x"` misclassifies EIP-7702 accounts
 
 A delegated EOA carries code — `0xef0100` followed by a 20-byte implementation address —
 so the naive contract test counts it as a contract. In one holder cohort this turned
@@ -134,7 +160,7 @@ Test the prefix: 23 bytes beginning `0xef0100` is a delegated **EOA**, not a con
 The same tell identifies batch tooling — many claimers delegating to one implementation
 is a sybil signal, not a diversity signal.
 
-## 15. Holder count is not dispersion
+## 16. Holder count is not dispersion
 
 Neither a large holder count nor a small one tells you the float is dispersed. Two
 distinct populations both inflate it and neither is a retail holder:
@@ -161,5 +187,5 @@ label for the first group: their lifetime inflow can exceed total supply many ti
 | Liquidity profile | Integrated reserves within ~10% of pool ERC-20 balances |
 | Attribution closure | Tiers sum exactly to float; nothing counted twice |
 | Two-method agreement | Lineage total and balance total differ only by explained in-flight |
-| Privileges | Every mint/pause/blacklist path outside bridge logic named, with its holder |
+| Privileges | Every contract that holds or moves the token audited — adapter, vesting factory, distributor — not just the token; each live path named with its holder and threshold |
 | Cross-chain labels | No address tagged as issuer on one chain and untagged on another |
