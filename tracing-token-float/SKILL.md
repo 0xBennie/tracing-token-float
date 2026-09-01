@@ -23,6 +23,17 @@ The single most common failure is not a wrong number, it's a **mixed denominator
 
 **Not for:** price prediction, TA, or any question that doesn't reduce to "who holds what, and can they sell it."
 
+## Before Anything: can they just mint more?
+
+Read the token contract before you replay a single event. If there is a `mint`, `pause`,
+or `blacklist` path outside the bridge logic — or the contract is a proxy whose admin can
+add one — then "who controls the float" is the wrong question: they don't need to control
+existing supply, they can print. Check `owner()`, the EIP-1967 admin slot, and every
+privileged function; name who holds each.
+
+This also decides whether `totalSupply()` is an invariant you may build identity checks
+on. If it isn't, every gate below needs to account for supply changes explicitly.
+
 ## The Chain
 
 Work bottom-up. Each layer is worthless if the one below it didn't pass its gate.
@@ -35,7 +46,7 @@ Work bottom-up. Each layer is worthless if the one below it didn't pass its gate
 | **L3 Clustering** | Address clusters under one controller | Infrastructure addresses excluded (see pitfalls) or clusters collapse |
 | **L4 Sybil** | Batch-controlled airdrop claimers | Collision rate compared against a stated null hypothesis |
 | **L5 Control** | Who holds the keys; what the locks are actually worth | Effective lock period computed, not assumed |
-| **L6 Cross-chain** | Per-chain supply reconciled | Adapter escrow == remote `totalSupply`; residual explained |
+| **L6 Cross-chain** | Bridge mode determined, then per-chain supply reconciled | Lock-and-mint: adapter escrow == remote `totalSupply`. Native burn/mint: per-chain supplies sum to the global total. Residual named per message |
 | **L7 Market** | Depth curve, real exit liquidity | Liquidity profile reproduces pool reserves within ~10% |
 | **L8 Close** | Two independent totals agree | Lineage method and balance method differ only by explainable in-flight amounts |
 
@@ -74,6 +85,7 @@ Then state the ratio plainly: **controlled position at mark price, versus total 
 
 ## Verification
 
+- Tag addresses in one pass across all chains, not per-chain then summed — the same address can look inert on one chain and be a signer on another
 - Snapshot at a stated block and time — and read any single pool's state within one consistent block (see pitfalls #12)
 - Number every claim (`A1`, `J4`, …) so reviewers can accept or reject them one at a time
 - Recompute each headline figure by a second path before it ships

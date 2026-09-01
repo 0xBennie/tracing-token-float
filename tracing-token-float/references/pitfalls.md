@@ -85,7 +85,20 @@ Intersect the owner sets of every holding multisig too. Separate multisigs shari
 
 ## 11. Same address, different role per chain
 
-With LayerZero OFT, the adapter on the home chain and the token contract on the remote chain frequently share an address. Reconcile explicitly: adapter escrow == remote `totalSupply`. Any residual must be named (in-flight messages, a mis-sent transfer). Enumerate `peers()` to bound how many chains exist — don't assume.
+With LayerZero OFT, the adapter on the home chain and the token contract on the remote chain frequently share an address. Enumerate `peers()` to bound how many chains exist — don't assume the disclosed count.
+
+**Determine the bridge mode first — the reconciliation formula depends on it.** Read the
+debit/credit path: does it move tokens into an adapter (lock-and-mint) or `_burn`/`_mint`
+(native)? Lock-and-mint reconciles as adapter escrow == remote `totalSupply`; native
+reconciles as the per-chain supplies summing to the global total. Get this backwards and
+L6 is wrong in a way that looks arithmetically fine.
+
+Pairing the send/receive events by their message `guid` beats a balance snapshot: every
+residual resolves to a specific transaction instead of an unexplained delta.
+
+**Tag addresses across all chains in one pass.** The same address can be a labelled
+multisig signer on one chain and an unremarkable holder on the other. Labelling each
+chain independently and summing lets an entity hide in the chain you looked at second.
 
 ## 12. Pool state read across blocks
 
@@ -111,6 +124,30 @@ the same state, or the reserve self-check compares two different pools.
 
 Rotate endpoints and retry. Batch JSON-RPC arrays above ~120 items get rejected outright by most public nodes, and some free tiers cap batches far lower (drpc: 3) — detect that error and drop the endpoint from your batch rotation rather than failing the run. Cache `tickBitmap` words and `ticks` results; a naive tick walk re-fetches the same words thousands of times and will time out.
 
+## 14. `getCode != "0x"` misclassifies EIP-7702 accounts
+
+A delegated EOA carries code — `0xef0100` followed by a 20-byte implementation address —
+so the naive contract test counts it as a contract. In one holder cohort this turned
+71 real contracts into 219, inflating "contract-held" supply threefold.
+
+Test the prefix: 23 bytes beginning `0xef0100` is a delegated **EOA**, not a contract.
+The same tell identifies batch tooling — many claimers delegating to one implementation
+is a sybil signal, not a diversity signal.
+
+## 15. Holder count is not dispersion
+
+Neither a large holder count nor a small one tells you the float is dispersed. Two
+distinct populations both inflate it and neither is a retail holder:
+
+- **Wash-trading wallets** — one-shot round trips that buy from a pool and sell straight
+  back, leaving a wei-level remainder. Tell: first inflow and last outflow are the same
+  pool, `n_in == n_out == 1`.
+- **Passive airdrop wallets** — funded once by the distributor and never moved. Tell:
+  first inflow is the claim contract, `n_out == 0`.
+
+Classify before counting, and report what the holders actually are. "Dust" is the wrong
+label for the first group: their lifetime inflow can exceed total supply many times over.
+
 ---
 
 ## Quick self-checks
@@ -124,3 +161,5 @@ Rotate endpoints and retry. Batch JSON-RPC arrays above ~120 items get rejected 
 | Liquidity profile | Integrated reserves within ~10% of pool ERC-20 balances |
 | Attribution closure | Tiers sum exactly to float; nothing counted twice |
 | Two-method agreement | Lineage total and balance total differ only by explained in-flight |
+| Privileges | Every mint/pause/blacklist path outside bridge logic named, with its holder |
+| Cross-chain labels | No address tagged as issuer on one chain and untagged on another |
