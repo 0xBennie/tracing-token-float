@@ -13,6 +13,8 @@ mark price". In thin markets those differ by orders of magnitude.
 """
 from rpc import s256
 
+MIN_TICK, MAX_TICK = -887272, 887272
+
 SEL = dict(slot0="0x3850c7bd", liquidity="0x1a686502", tickSpacing="0xd0c93a7c",
            fee="0xddca3f43", token0="0x0dfe1681", token1="0xd21220a7",
            bitmap="0x5339c296", ticks="0xf30dba93")
@@ -41,7 +43,7 @@ class Pool:
     are pruned and reject historical eth_call.
     """
 
-    def __init__(self, client, addr, dec0, dec1, span_down=300_000, span_up=120_000,
+    def __init__(self, client, addr, dec0, dec1, span_down=None, span_up=None,
                  batch=120, block=None, retries=3):
         self.c, self.a, self.d0, self.d1 = client, addr, dec0, dec1
         b = block or "latest"
@@ -73,8 +75,14 @@ class Pool:
         self._scan(down, up, batch, b)
 
     def _scan(self, down, up, batch, b):
-        lo = ((self.tick - down) // self.ts) >> 8
-        hi = ((self.tick + up) // self.ts) >> 8
+        # Scan the FULL valid tick range by default. The two structural identities
+        # (sum(liquidityNet) == 0, and the below-price sum == active liquidity) only
+        # hold over a complete profile — and they are the only checks that catch a
+        # truncated window, which otherwise reports the bottom of the scanned range as
+        # a price floor. Cost is bounded: word count is 2*887272/tickSpacing/256, so
+        # ~35 words at tickSpacing 200 and ~6,932 at tickSpacing 1.
+        lo = (MIN_TICK // self.ts) >> 8 if down is None else ((self.tick - down) // self.ts) >> 8
+        hi = (MAX_TICK // self.ts) >> 8 if up is None else ((self.tick + up) // self.ts) >> 8
         wps = list(range(lo, hi + 1))
         words = dict(zip(wps, (int(r, 16) for r in self.c.batch(
             [("eth_call", [{"to": self.a, "data": SEL["bitmap"] + f"{_u256(w):064x}"}, b])
@@ -116,14 +124,27 @@ class Pool:
             L += self.net[t]
         m0, m1 = a0 / 10 ** self.d0, a1 / 10 ** self.d1
 
+        # Two structural identities that hold for ANY complete V3 profile. They catch
+        # window truncation, which the reserve comparison alone does not: a scan that
+        # stops short still reconstructs plausible reserves, then silently reports the
+        # bottom of the scanned range as a price floor.
+        net_all = sum(self.net.values())
+        net_below = sum(v for t, v in self.net.items() if t <= self.tick)
+        id_sum_zero = abs(net_all) <= max(1, abs(self.L0)) * 1e-9
+        id_active = abs(net_below - self.L0) <= max(1, abs(self.L0)) * 1e-9
+
         def band(model, chain):
             if chain <= 0:
                 return -1e-9 <= model <= 1e-9
-            return 0 <= model <= chain * 1.05 and model >= chain * 0.4
+            # Model must never EXCEED the balance (fees inflate the balance, not positions)
+            # and must not fall far short — a large shortfall means the window was too narrow.
+            return 0 <= model <= chain * 1.05 and model >= chain * 0.75
         return dict(model0=m0, chain0=self.reserve0, model1=m1, chain1=self.reserve1,
                     err0_pct=(m0 / self.reserve0 - 1) * 100 if self.reserve0 else 0.0,
                     err1_pct=(m1 / self.reserve1 - 1) * 100 if self.reserve1 else 0.0,
-                    ok=band(m0, self.reserve0) and band(m1, self.reserve1),
+                    sum_net=net_all, id_sum_zero=id_sum_zero, id_active_liquidity=id_active,
+                    ok=(band(m0, self.reserve0) and band(m1, self.reserve1)
+                        and id_sum_zero and id_active),
                     ticks=len(self.ticks))
 
     def sell(self, amount0):
@@ -176,6 +197,60 @@ class Pool:
                     partial=filled < amount0 * 0.999,
                     stop="quote exhausted" if capped
                          else ("liquidity exhausted" if rem > 0 else "filled"))
+
+
+    # ---------- selling token1 (walks the book upward) ----------
+    def sell1(self, amount1):
+        """Sell `amount1` of token1 for token0.
+
+        A token is token1 whenever its address sorts above its quote asset's, which
+        is arbitrary — so half of all tokens can only be sold in this direction. The
+        book walks UP: adding token1 makes token0 scarcer, sqrtPrice rises, and the
+        token1-denominated price (1/P) falls. Liquidity crossings flip sign too.
+        """
+        total = amount1 * 10 ** self.d1
+        rem, out = total, 0.0
+        sqrtP, L, f = self.sqrtP, float(self.L0), self.fee / 1e6
+        cap = self.reserve0 * 10 ** self.d0
+        capped = False
+        for t in sorted(t for t in self.ticks if t > self.tick):
+            if rem <= 0:
+                break
+            sn = 1.0001 ** (t / 2)
+            if sn <= sqrtP:
+                L += self.net[t]
+                continue
+            if L > 0:
+                after_fee = rem * (1 - f)
+                dy = L * (sn - sqrtP)                     # token1 the step absorbs
+                end = sqrtP + after_fee / L if after_fee < dy else sn
+                seg = L * (1 / sqrtP - 1 / end)           # token0 paid out
+                if out + seg >= cap:                      # token0 side runs dry
+                    end = 1 / (1 / sqrtP - (cap - out) / L)
+                    rem -= L * (end - sqrtP) / (1 - f)
+                    out, sqrtP, capped = cap, end, True
+                    break
+                out += seg
+                if after_fee < dy:
+                    sqrtP, rem = end, 0
+                    break
+                rem -= dy / (1 - f)
+            sqrtP = sn
+            L += self.net[t]
+        filled = (total - max(rem, 0)) / 10 ** self.d1
+        proceeds = out / 10 ** self.d0
+        end_px = 1 / (sqrtP ** 2 * 10 ** (self.d0 - self.d1))
+        return dict(requested=amount1, filled=filled, proceeds=proceeds,
+                    avg=proceeds / filled if filled else 0.0, end_price=end_px,
+                    drawdown_pct=(end_px / self.price1 - 1) * 100,
+                    partial=filled < amount1 * 0.999,
+                    stop="quote exhausted" if capped
+                         else ("liquidity exhausted" if rem > 0 else "filled"))
+
+    @property
+    def price1(self):
+        """Price of token1 denominated in token0."""
+        return 1 / self.price
 
     def curve(self, sizes):
         return [self.sell(s) for s in sizes]

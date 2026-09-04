@@ -24,6 +24,7 @@ def trace(cur, target, terminals, max_hop=4, min_share=0.01, table="transfers"):
     Returns {label: share} summing to ~1.0."""
     agg = collections.Counter()
     frontier = {target.lower(): 1.0}
+    terminals = {k.lower(): v for k, v in terminals.items()}
     seen = set()
     for hop in range(max_hop):
         nxt = collections.Counter()
@@ -56,7 +57,12 @@ def trace(cur, target, terminals, max_hop=4, min_share=0.01, table="transfers"):
 
 
 def net_flow(cur, a, b, table="transfers"):
-    """Net tokens from a -> b. The robust alternative for high-frequency addresses."""
+    """Net tokens from a -> b.
+
+    NOT a behaviour signal on its own — see pitfalls #18. Useful only for the narrow
+    question "did value move between these two specific addresses", e.g. testing whether
+    a supposedly independent desk returns inventory to the issuer's treasury."""
+    a, b = a.lower(), b.lower()
     q = f"SELECT COALESCE(SUM(CAST(val AS REAL)),0)/{WEI} FROM {table} WHERE frm=? AND dst=?"
     return cur.execute(q, (a, b)).fetchone()[0] - cur.execute(q, (b, a)).fetchone()[0]
 
@@ -64,11 +70,24 @@ def net_flow(cur, a, b, table="transfers"):
 def first_funder(cur, a, table="transfers"):
     """(block, from, amount) of the first inbound transfer — who opened this address."""
     r = cur.execute(f"SELECT block, frm, CAST(val AS REAL)/{WEI} FROM {table} "
-                    f"WHERE dst=? ORDER BY block, li LIMIT 1", (a,)).fetchone()
+                    f"WHERE dst=? ORDER BY block, li LIMIT 1", (a.lower(),)).fetchone()
     return r
 
 
 def balance(cur, a, table="transfers"):
+    """Display balance. Float — do NOT use in an identity check (pitfalls #2).
+
+    For "rebuilt balances sum to totalSupply", accumulate the raw wei strings with
+    Python int instead; REAL loses precision above 2^53, i.e. above ~9 tokens."""
+    a = a.lower()
     q_in = f"SELECT COALESCE(SUM(CAST(val AS REAL)),0) FROM {table} WHERE dst=?"
     q_out = f"SELECT COALESCE(SUM(CAST(val AS REAL)),0) FROM {table} WHERE frm=?"
     return (cur.execute(q_in, (a,)).fetchone()[0] - cur.execute(q_out, (a,)).fetchone()[0]) / WEI
+
+
+def balance_exact(cur, a, table="transfers"):
+    """Exact wei balance via Python int — the one to use in identity checks."""
+    a = a.lower()
+    i = sum(int(v) for (v,) in cur.execute(f"SELECT val FROM {table} WHERE dst=?", (a,)))
+    o = sum(int(v) for (v,) in cur.execute(f"SELECT val FROM {table} WHERE frm=?", (a,)))
+    return i - o

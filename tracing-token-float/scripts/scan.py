@@ -60,10 +60,15 @@ def discover_pools(c, token, lookback=40_000, chunk=2_000, cap=400):
 
 
 def decimals(c, tok):
-    try:
-        return int(c.eth_call(tok, "0x313ce567"), 16)
-    except Exception:
-        return 18
+    # No silent default. Falling back to 18 on a USDC-quoted pool misprices every figure
+    # by 1e12 — a wrong number that still looks like a number.
+    for _ in range(3):
+        try:
+            return int(c.eth_call(tok, "0x313ce567"), 16)
+        except Exception:
+            pass
+    raise RuntimeError(f"decimals() unreadable for {tok} — refusing to guess; "
+                       f"pass the pool explicitly or retry when the node recovers")
 
 
 def main():
@@ -113,8 +118,9 @@ def main():
     print("[2] EXIT LIQUIDITY — what the book can actually absorb\n")
     pools = [x.lower() for x in a.pools] if a.pools else discover_pools(c, tok)
     if not pools:
-        print("  no V3-style pools found (pass --pools, or the token may trade on V2/CEX only)")
-        return
+        print("  no V3-style pools found. The token may trade only on V2-style pools")
+        print("  (constant-product, no slot0) or on CEXs — pass --pools explicitly.")
+        print("  WARNING: absence of V3 pools is NOT absence of liquidity; this scan cannot see V2.")
     d_tok = decimals(c, tok)
     reachable, tvl, rows = 0.0, 0.0, []
     for pa in pools:
@@ -123,27 +129,33 @@ def main():
             t1 = "0x" + c.eth_call(pa, "0xd21220a7")[-40:]
             flip = t0.lower() != tok
             quote = t0 if flip else t1
-            if flip:
-                print(f"  {pa}  token is token1 — sell simulation not supported, skipped")
-                continue
-            pool = Pool(c, pa, d_tok, decimals(c, quote))
+            # Whether a token is token0 or token1 is decided by address sort order, which
+            # is arbitrary — half of all tokens can only be sold in the token1 direction.
+            # Skipping those pools silently reports zero exit liquidity for the token.
+            pool = Pool(c, pa, decimals(c, t0), decimals(c, t1))
+            pool.flip = flip
         except InconsistentState as e:
             print(f"  {pa}  profile failed self-check, skipped: {str(e)[:90]}")
             continue
         except Exception as e:
             print(f"  {pa}  unreadable, skipped: {str(e)[:90]}")
             continue
-        drain = pool.sell(10 ** 12)
+        sell = pool.sell1 if pool.flip else pool.sell
+        px = pool.price1 if pool.flip else pool.price
+        res0 = pool.reserve1 if pool.flip else pool.reserve0
+        res1 = pool.reserve0 if pool.flip else pool.reserve1
+        drain = sell(10 ** 12)
         reachable += drain["proceeds"]
-        tvl += pool.reserve0 * pool.price + pool.reserve1
+        tvl += res0 * px + res1
         rows.append((pa, pool, drain))
         print(f"  {pa}")
-        print(f"     price ${pool.price:.6f}   reserves {pool.reserve0:,.0f} tok / "
-              f"${pool.reserve1:,.0f} quote   self-check ok={pool.check['ok']}")
+        print(f"     price ${px:.6f}   reserves {res0:,.0f} tok / "
+              f"${res1:,.0f} quote   self-check ok={pool.check['ok']}"
+              f"{'   [token is token1]' if pool.flip else ''}")
         print(f"     {'sell':>13} {'fillable':>13} {'proceeds':>12} {'avg':>10} "
               f"{'after':>11} {'drop':>7}  stop")
         for s in (10_000, 100_000, 1_000_000):
-            r = pool.sell(s)
+            r = sell(s)
             print(f"     {s:>13,} {r['filled']:>13,.0f} {r['proceeds']:>12,.0f} "
                   f"{r['avg']:>10.4f} {r['end_price']:>11.6f} {r['drawdown_pct']:>6.1f}%  {r['stop']}")
         print(f"     book absorbs {drain['filled']:,.0f} tokens in total, paying ${drain['proceeds']:,.0f}")
@@ -153,7 +165,13 @@ def main():
 
     # ---- 3. the ratio --------------------------------------------------------
     print("[3] VERDICT\n")
-    px = rows[0][1].price if rows else 0
+    if not rows:
+        live = [f["name"] for e in out["privileges"] for f in e.get("privileged", []) if f.get("live")]
+        if live:
+            print(f"  !! live unilateral control path: {live}")
+            print("     (no depth measured — the privilege finding stands on its own)")
+        return
+    px = (rows[0][1].price1 if rows[0][1].flip else rows[0][1].price) if rows else 0
     print(f"  displayed liquidity (TVL style)   ${tvl:,.0f}")
     print(f"  actually reachable by selling     ${reachable:,.0f}"
           + (f"   ({tvl/reachable:.1f}x overstated)" if reachable > 0 else ""))

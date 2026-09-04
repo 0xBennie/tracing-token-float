@@ -40,7 +40,9 @@ Before any number leaves this stage, integrate the profile back into reserves an
 - Upward, accumulating `L * (1/sqrtP_lo - 1/sqrtP_hi)` → token0
 - Crossing a tick downward: `L -= liquidityNet`. Upward: `L += liquidityNet`.
 
-Reconstructed reserves should land within ~10% of the on-chain balances. The shortfall is uncollected and protocol fees, which sit in the balance but never participate in swaps. Orders-of-magnitude divergence means a decode bug; a large but finite gap means the scan window was too narrow.
+Reconstructed reserves should sit at or just below the on-chain balances — never above. The shortfall is uncollected and protocol fees, which sit in the balance but never participate in swaps. Orders-of-magnitude divergence means a decode bug; a large finite gap means the scan window was too narrow.
+
+**Also assert the two structural identities**, which catch truncation the reserve comparison does not: over the full tick range `sum(liquidityNet) == 0`, and `sum(liquidityNet for t <= currentTick) == liquidity()`. A truncated scan still reconstructs plausible-looking reserves and then reports the bottom of the scanned range as a price floor — that is exactly how a depth file full of fake floors got produced.
 
 **Do not report depth numbers from a profile that hasn't passed this check.**
 

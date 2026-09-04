@@ -21,38 +21,43 @@ SLOT_ADMIN = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103
 SLOT_BEACON = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 
 DANGEROUS = {
-    # supply
+    # Every selector below computed with keccak-256 at patch time — no recalled
+    # constants. Regenerate rather than hand-edit; a wrong selector reads as "absent".
     "0x40c10f19": ("mint(address,uint256)", "supply"),
     "0xa0712d68": ("mint(uint256)", "supply"),
     "0x449a52f8": ("mintTo(address,uint256)", "supply"),
     "0x9dc29fac": ("burn(address,uint256)", "supply"),
-    "0x156e29f6": ("mint(address,uint256,bytes)", "supply"),
-    # transfer control
+    "0x94d008ef": ("mint(address,uint256,bytes)", "supply"),
     "0x8456cb59": ("pause()", "freeze"),
     "0x3f4ba83a": ("unpause()", "freeze"),
     "0xf9f92be4": ("blacklist(address)", "freeze"),
     "0x0ecb93c0": ("addBlackList(address)", "freeze"),
     "0xe4997dc5": ("removeBlackList(address)", "freeze"),
-    "0x1a8e55b0": ("setBlacklisted(address,bool)", "freeze"),
-    # escape hatches — the ones that quietly drain escrow
+    "0xd01dd6d2": ("setBlacklisted(address,bool)", "freeze"),
     "0x01681a62": ("sweep(address)", "escape"),
     "0x6ea056a9": ("sweep(address,uint256)", "escape"),
-    "0x71f4e1b0": ("rescueTokens(address,address,uint256)", "escape"),
-    "0x8980f11f": ("emergencyWithdraw(address,uint256)", "escape"),
+    "0xdf2ab5bb": ("sweepToken(address,uint256,address)", "escape"),
+    "0xcea9d26f": ("rescueTokens(address,address,uint256)", "escape"),
+    "0x8cd4426d": ("rescueERC20(address,uint256)", "escape"),
+    "0x8980f11f": ("recoverERC20(address,uint256)", "escape"),
+    "0xbc25cf77": ("skim(address)", "escape"),
+    "0x95ccea67": ("emergencyWithdraw(address,uint256)", "escape"),
+    "0xdb2e21bc": ("emergencyWithdraw()", "escape"),
+    "0x5312ea8e": ("emergencyWithdraw(uint256)", "escape"),
     "0x51cff8d9": ("withdraw(address)", "escape"),
     "0xf3fef3a3": ("withdraw(address,uint256)", "escape"),
     "0x00f714ce": ("withdraw(uint256,address)", "escape"),
-    "0xdb2e21bc": ("emergencyWithdraw()", "escape"),
-    "0x5312ea8e": ("emergencyWithdraw(uint256)", "escape"),
-    # ownership / upgrade
+    "0x9e281a98": ("withdrawToken(address,uint256)", "escape"),
+    "0x66b44840": ("withdrawPool(address,address)", "escape"),
     "0x8da5cb5b": ("owner()", "ownership"),
     "0xf2fde38b": ("transferOwnership(address)", "ownership"),
+    "0x2f2ff15d": ("grantRole(bytes32,address)", "ownership"),
     "0x3659cfe6": ("upgradeTo(address)", "upgrade"),
     "0x4f1ef286": ("upgradeToAndCall(address,bytes)", "upgrade"),
-    "0x2f2ff15d": ("grantRole(bytes32,address)", "ownership"),
-    # vesting rewrite
-    "0x0e8ddd4d": ("updateSchedule(uint256,uint256)", "vesting"),
-    "0x1c31f710": ("updateBeneficiary(address)", "vesting"),
+    "0xe6671f90": ("updateSchedule(uint256,uint256)", "vesting"),
+    "0x0aaffd2a": ("updateBeneficiary(address)", "vesting"),
+    "0x1c31f710": ("setBeneficiary(address)", "vesting"),
+    "0x20c5429b": ("revoke(uint256)", "vesting"),
 }
 
 
@@ -150,14 +155,42 @@ def probe_callable(c, addr, sel, owner, arg=None):
     return "INCONCLUSIVE (both revert alike)"
 
 
+def is_delegated_eoa(code):
+    """EIP-7702 delegation: 23 bytes of 0xef0100 + a 20-byte implementation address.
+
+    Such an account HAS code but is still an EOA. `getCode != "0x"` counts it as a
+    contract — in one holder cohort that turned 71 real contracts into 219. The same
+    tell also identifies batch tooling: many claimers delegating to one implementation."""
+    c = code[2:] if code.startswith("0x") else code
+    return len(c) == 46 and c.lower().startswith("ef0100")
+
+
+def delegate_target(code):
+    c = code[2:] if code.startswith("0x") else code
+    return "0x" + c[6:46] if is_delegated_eoa(code) else None
+
+
 def audit(c, addr, check_callable=True):
     code = c.call("eth_getCode", [addr, "latest"])
     if code in ("0x", "0x0"):
-        return dict(address=addr, is_contract=False)
+        return dict(address=addr, is_contract=False, is_eoa=True)
+    if is_delegated_eoa(code):
+        return dict(address=addr, is_contract=False, is_eoa=True,
+                    eip7702_delegated=True, delegate=delegate_target(code),
+                    verdict=["EIP-7702 delegated EOA — has code but is not a contract"])
     sels = selectors(code)
     found = [dict(selector=s, name=DANGEROUS[s][0], kind=DANGEROUS[s][1])
              for s in sorted(sels & DANGEROUS.keys())]
     impl, admin = _slot(c, addr, SLOT_IMPL), _slot(c, addr, SLOT_ADMIN)
+    # A proxy's own bytecode is a 45-byte delegate stub with no dispatch table — scanning
+    # it finds nothing. The functions that matter live in the implementation.
+    if impl:
+        try:
+            icode = c.call("eth_getCode", [impl, "latest"])
+            if icode not in ("0x", "0x0"):
+                sels |= selectors(icode)
+        except Exception:
+            pass
     owner = None
     try:
         owner = "0x" + c.eth_call(addr, "0x8da5cb5b")[-40:]
@@ -169,7 +202,11 @@ def audit(c, addr, check_callable=True):
         for f in found:
             if f["kind"] in ("escape", "supply", "vesting"):
                 f["owner_can_call"] = probe_callable(c, addr, f["selector"], owner)
-                f["live"] = f["owner_can_call"].startswith("OWNER-ONLY")
+                # ANYONE is strictly worse than OWNER-ONLY: an unguarded escape hatch
+                # can be called by anyone, not merely by the owner. Both are live.
+                f["live"] = (f["owner_can_call"].startswith("OWNER-ONLY")
+                             or f["owner_can_call"] == "ANYONE")
+                f["unguarded"] = f["owner_can_call"] == "ANYONE"
     return dict(address=addr, is_contract=True, codesize=(len(code) - 2) // 2,
                 is_proxy=bool(impl or admin), implementation=impl, proxy_admin=admin,
                 owner=owner, privileged=found,
@@ -185,8 +222,13 @@ def _verdict(found, impl, admin):
         bad.append("supply is mutable — float control is moot, they can print")
     if "escape" in kinds:
         live = [f["name"] for f in found if f["kind"] == "escape" and f.get("live")]
-        bad.append(f"LIVE escape hatch {live} — held balances can be withdrawn unilaterally, no delay"
-                   if live else "escape hatch present — held balances may be withdrawable")
+        openf = [f["name"] for f in found if f["kind"] == "escape" and f.get("unguarded")]
+        if openf:
+            bad.append(f"UNGUARDED escape hatch {openf} — callable by ANYONE, not just the owner")
+        if live:
+            bad.append(f"LIVE escape hatch {live} — held balances can be withdrawn unilaterally, no delay")
+        if not live and not openf:
+            bad.append("escape hatch present — held balances may be withdrawable")
     if "freeze" in kinds:
         bad.append("transfers can be frozen or addresses blacklisted")
     if "vesting" in kinds:

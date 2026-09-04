@@ -54,13 +54,23 @@ Work bottom-up. Each layer is worthless if the one below it didn't pass its gate
 |---|---|---|
 | **L0 Replay** | Local DB of every `Transfer` event; balances rebuilt from flows | Rebuilt balances sum **exactly** to `totalSupply` (wei-precise); zero negative balances; holder count matches the explorer |
 | **L1 Distribution** | The genesis tree: deployer EOA → first large transfers → each allocation bucket | Every on-chain bucket reconciles against the published allocation table; discrepancies named |
+| **L1.5 Pool birth** | Who took the initial liquidity, in the block that seeded it | The block that created each pool is read transaction by transaction |
 | **L2 Attribution** | Each material address tagged with an ownership tier (below) | Tiers sum exactly to the float |
 | **L3 Clustering** | Address clusters under one controller | Infrastructure addresses excluded (see pitfalls) or clusters collapse |
 | **L4 Sybil** | Batch-controlled airdrop claimers | Collision rate compared against a stated null hypothesis |
 | **L5 Control** | Who holds the keys; what the locks are actually worth | Effective lock period computed, not assumed |
 | **L6 Cross-chain** | Bridge mode determined, then per-chain supply reconciled | Lock-and-mint: adapter escrow == remote `totalSupply`. Native burn/mint: per-chain supplies sum to the global total. Residual named per message |
-| **L7 Market** | Depth curve, real exit liquidity | Liquidity profile reproduces pool reserves within ~10% |
+| **L7 Market** | Depth curve, real *third-party* exit liquidity | `sum(liquidityNet)==0`, below-tick sum == `liquidity()`, and reserves reproduced without exceeding the balance |
 | **L8 Close** | Two independent totals agree | Lineage method and balance method differ only by explainable in-flight amounts |
+
+**L1.5 is the layer most analyses skip, and it decided this one.** Read the pool-creation
+block itself, in order. In the case this skill came from, the issuer seeded roughly 11 million
+tokens and **87.3% left in the same block** — nine addresses, log indices in an arithmetic
+run with nothing interleaved, so the snipes were bundled directly behind the seeding
+transaction. The same nine appeared together in 32 later blocks out of some 39,000 distinct
+buyers. None of that is visible in balances, net flows, or holder counts; it is visible
+only by reading one block. The sister chain, seeded by the same team, had **zero**
+same-block outflow — so this is a per-pool fact, never an assumption.
 
 ## Attribution Tiers
 
@@ -90,7 +100,7 @@ They must agree. A residual is acceptable only when you can name it (cross-chain
 Paper market cap is not exit liquidity. Build the V3 liquidity profile and simulate the sell:
 
 - Walk `tickBitmap` → `ticks` to get every initialized tick and its `liquidityNet`
-- **Self-check:** integrate the profile back into token0/token1 reserves and compare to the pool's actual ERC-20 balances. Within ~10% is expected (the gap is uncollected fees, which don't participate in swaps). A wild mismatch means your profile is wrong — usually the sign-extension trap in pitfalls.
+- **Self-check:** integrate the profile back into token0/token1 reserves and compare to the pool's actual ERC-20 balances. The model must never EXCEED the balance (fees inflate the balance, not positions) and a shortfall beyond ~25% means the scan window truncated the book. Two structural identities catch truncation that the reserve comparison alone misses: `sum(liquidityNet) == 0` over the full tick range, and the sum below the current tick equalling `liquidity()`. Assert all four.
 - Simulate sells across sizes; report tokens actually fillable, proceeds, average price, and post-trade price
 
 Then state the ratio plainly: **controlled position at mark price, versus total stablecoin reachable across every pool.** This is usually the finding that reframes everything else.
@@ -117,6 +127,9 @@ Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above)
 | Trusting an explorer's holder list | Contract-held and bridged balances are misattributed; you never see the flows |
 | Mixed numerator/denominator | Headline percentage is meaningless |
 | Treating pool ERC-20 balance as the issuer's LP position | Third-party LPs and JIT liquidity get attributed to the issuer |
-| Weighted lineage on a high-frequency address | Its own churn dilutes provenance to noise; use net-flow or timing evidence instead |
+| Weighted lineage on a high-frequency address | Its own churn dilutes provenance to noise; use the first-funding tx and pool-creation-block position — a net balance fails the same way |
+| Classifying behaviour from net flow or buy/sell counts | Both discard time; a one-block snipe followed by six weeks of distribution reads as accumulation |
+| Treating a passed screen as a verdict | The most convincing candidates fail mechanically — fee claims and exchange wallets both mimic accumulation |
+| Totalling exit liquidity without attributing LP ownership | The issuer's own bid counts as depth it can sell into; report third-party reachable quote separately |
 | Reporting assumed attribution as fact | One rebuttal discredits the whole analysis |
 | Quoting market cap without depth | The headline risk number is off by orders of magnitude |

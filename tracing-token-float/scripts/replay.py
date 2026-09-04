@@ -84,6 +84,9 @@ def verify(db, cli=None, token=None):
         print(f"  difference       {d} wei  {'OK — exact' if d == 0 else 'FAIL'}")
         if d:
             print("  → a range is missing, or the token mints/burns outside Transfer events")
+        # The supply identity is the gate. Returning True on a mismatch lets every
+        # downstream percentage be computed on a dataset that is known to be incomplete.
+        return not neg and d == 0
     return not neg
 
 
