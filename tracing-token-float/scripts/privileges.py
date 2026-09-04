@@ -247,3 +247,41 @@ def safe_control(c, addr):
                     owners=["0x" + raw[128 + i * 64:192 + i * 64][-40:] for i in range(n)])
     except Exception:
         return dict(is_safe=False)
+
+
+if __name__ == "__main__":
+    import argparse, json, sys
+    from rpc import Client, BASE, BSC, ETH
+    NETS = {"base": BASE, "bsc": BSC, "eth": ETH}
+    p = argparse.ArgumentParser(description=__doc__ and __doc__.split("\n")[0])
+    p.add_argument("--chain", required=True, choices=list(NETS))
+    p.add_argument("addresses", nargs="+",
+                   help="every contract that HOLDS or MOVES the token, not just the token: "
+                        "bridge adapters, vesting factories, distributors, staking pools")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--no-probe", action="store_true",
+                   help="skip the live stranger-vs-owner call that proves a path is real")
+    a = p.parse_args()
+    c = Client(NETS[a.chain])
+    out = []
+    for addr in a.addresses:
+        r = audit(c, addr.lower(), check_callable=not a.no_probe)
+        out.append({"address": addr.lower(), **r})
+        if a.json:
+            continue
+        print(f"\n{addr.lower()}")
+        if not r.get("is_contract"):
+            print("  EOA — not a contract"); continue
+        print(f"  codesize {r['codesize']}  proxy={r['is_proxy']}  owner={r['owner']}")
+        for f in r["privileged"]:
+            print(f"  {'!!' if f.get('live') else '  '} [{f['kind']:9s}] {f['name']:36s} "
+                  f"{f.get('owner_can_call','')}")
+        for v in r["verdict"]:
+            print(f"  -> {v}")
+        if r.get("owner"):
+            s = safe_control(c, r["owner"])
+            if s["is_safe"]:
+                print(f"  -> owner is a Safe {s['threshold']}/{len(s['owners'])}")
+    if a.json:
+        print(json.dumps(out, indent=1, default=str))
+    sys.exit(1 if any(f.get("live") for o in out for f in o.get("privileged", [])) else 0)

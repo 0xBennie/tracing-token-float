@@ -282,6 +282,69 @@ matches neither.
 
 ---
 
+## 23. A range nobody answered is invisible to the supply identity
+
+The gate everyone trusts cannot see the failure that actually happens.
+
+A pruned node does not error on a historical `eth_getLogs` it cannot serve. It returns
+`{"result": []}` — byte-identical to a genuinely quiet range. The scanner records the
+window as covered and moves on. 126 of 1383 ranges went this way on one BSC replay: no
+error, no crash, 620 negative balances, rebuilt supply 2.82M tokens high, every
+percentage wrong.
+
+Now the part that makes it lethal. **The supply identity does not catch this.** Every
+Transfer that is not a mint or a burn moves the same amount out of one balance and into
+another, so it contributes exactly zero to the sum of all balances. Delete an arbitrary
+number of pure peer-to-peer ranges and `sum(balances) == totalSupply` still holds to the
+wei. It moves only if the hole swallowed a mint or a burn — and on a fixed-supply token
+every mint happens in the deploy block, so the identity's entire detection power is spent
+before the first transfer. Negative balances only appear if a wallet's *funding* transfer
+fell in the hole, so a hole positioned after distribution completes produces none. **The
+failure mode gets quieter as the token matures — quietest exactly when the analysis
+matters most.**
+
+Worse, if `verify()` sums only positive balances (the obvious way to write it), the
+"rebuilt supply" difference it prints is algebraically equal to the negative-balance
+mass. Two lines that look like two agreeing gates are one number printed twice.
+
+What actually works, because it is provenance metadata rather than arithmetic over the
+rows you kept:
+
+- **Record successes, never failures.** A `ranges_done(lo PRIMARY KEY, hi, n, ts)` row
+  written in the *same transaction* as that window's transfers. A `holes` table is
+  write-only state that drifts; a missing `ranges_done` row cannot be forgotten and a
+  re-run heals it.
+- **Gate on the interval complement.** Merge the covered intervals, diff against
+  `[from_block, to_block]`, refuse to certify if anything is missing. Exit non-zero.
+- **Qualify the endpoint pool at startup** against a window known to contain logs, and
+  refuse to start if nothing answers. Keep historical-log endpoints in a separate list
+  from general `eth_call` endpoints — most public nodes serve one and not the other.
+- **Never accept `[]` on one node's word.** Re-query; only believe it when independent
+  attempts agree.
+- **Store `n` per window** and flag counts landing exactly on a round number (1000,
+  5000, 10000) — that is a silent result cap, not a quiet range.
+- **Pin `totalSupply()` to the scan's own upper block**, not `latest`. Otherwise a burn
+  after the scan can cancel a missing mint inside a hole.
+
+## 24. A rate limit is not a range error
+
+Both arrive as an error string with the word "limit" in it, and they demand opposite
+responses: a range error means *split the window*, a rate limit means *wait and retry the
+same window*. Match "limit exceeded" as a range signal and a throttled node will drive
+your scanner to bisect a perfectly good 5,000-block window down to single blocks, each of
+which gets throttled in turn. I did exactly this while hardening the scripts in this
+skill: a 10-window scan that takes 36 seconds turned into 500 one-block windows and ran
+for seven minutes before I killed it.
+
+Match range signals specifically — "block range", "response size", "too large", "result
+set", "query timeout" — and treat "rate limit", "too many requests", "429", "throttle",
+"quota" as a backoff. Check them in that order, and let rate signals veto range signals
+when a message contains both.
+
+Related: never skip `raise_for_status()`. A 429 or 503 carrying a JSON body parses as a
+normal reply, so the run ends blaming the data instead of the rate limit — and a
+`{"result": null}` handed back to a caller expecting a list crashes somewhere unrelated.
+
 ## Quick self-checks
 
 | Check | Passes when |

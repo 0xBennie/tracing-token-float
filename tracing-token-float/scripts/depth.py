@@ -17,7 +17,8 @@ MIN_TICK, MAX_TICK = -887272, 887272
 
 SEL = dict(slot0="0x3850c7bd", liquidity="0x1a686502", tickSpacing="0xd0c93a7c",
            fee="0xddca3f43", token0="0x0dfe1681", token1="0xd21220a7",
-           bitmap="0x5339c296", ticks="0xf30dba93")
+           bitmap="0x5339c296", ticks="0xf30dba93",
+           protocolFees="0x1ad8b03b")
 
 
 def _u256(x):
@@ -55,11 +56,26 @@ class Pool:
                 break
         self.check = last
         if not last["ok"]:
+            why = []
+            if not last["id_sum_zero"]:
+                why.append(f"sum(liquidityNet)={last['sum_net']} != 0 (book truncated)")
+            if not last["id_active_liquidity"]:
+                why.append("below-price liquidityNet != liquidity() (book truncated)")
+            if last["model0"] < 0 or last["model1"] < 0:
+                why.append("negative model (decode bug)")
+            if last["model0"] > last["chain0"] * 1.001:
+                why.append(f"model0 exceeds balance by "
+                           f"{last['model0'] - last['chain0']:.6g} (decode bug or stale read)")
+            if last["model1"] > last["chain1"] * 1.001:
+                why.append(f"model1 exceeds balance by "
+                           f"{last['model1'] - last['chain1']:.6g} (decode bug or stale read)")
             raise InconsistentState(
-                f"pool {addr}: profile does not reconstruct reserves after {retries} scans "
-                f"(token0 {last['err0_pct']:+.1f}%, token1 {last['err1_pct']:+.1f}%). "
-                f"Widen span_down/span_up if the book extends past the scan window; "
-                f"a negative model means a decode bug; heavy JIT churn may need block=hex(n).")
+                f"pool {addr}: " + "; ".join(why or ["unknown"]) +
+                f" [after {retries} scans; token0 {last['err0_pct']:+.2f}%, "
+                f"token1 {last['err1_pct']:+.2f}%, {last['ticks']} ticks]. "
+                f"A model exceeding the balance or going negative is a decode bug; "
+                f"a broken identity means the tick scan did not cover the whole book; "
+                f"heavy JIT churn between the slot0 and ticks reads needs block=hex(n).")
 
     def _read(self, b, dec0, dec1, down, up, batch):
         s0 = self.c.eth_call(self.a, SEL["slot0"], b)[2:]
@@ -72,6 +88,15 @@ class Pool:
         self.token1 = "0x" + self.c.eth_call(self.a, SEL["token1"], b)[-40:]
         self.reserve0 = self.c.erc20_balance(self.token0, self.a, dec0, b)
         self.reserve1 = self.c.erc20_balance(self.token1, self.a, dec1, b)
+        # Accrued protocol fees sit in the ERC-20 balance but back no swap. Reading them
+        # turns "the model is 99.8% short" from an alarm into an explained residual.
+        # Not every V3 fork exposes protocolFees(); absence is not an error.
+        try:
+            r = self.c.eth_call(self.a, SEL["protocolFees"], b)[2:]
+            self.pfee0 = int(r[:64], 16) / 10 ** dec0
+            self.pfee1 = int(r[64:128], 16) / 10 ** dec1
+        except Exception:
+            self.pfee0 = self.pfee1 = None
         self._scan(down, up, batch, b)
 
     def _scan(self, down, up, batch, b):
@@ -134,14 +159,34 @@ class Pool:
         id_active = abs(net_below - self.L0) <= max(1, abs(self.L0)) * 1e-9
 
         def band(model, chain):
+            """Only the two directions that are ALWAYS a bug.
+
+            A ratio floor looks like it catches a truncated window, and does not. It
+            fails both ways: a pool whose balance is 99.8% accrued protocol fees has a
+            model that is exactly right and a ratio of 0.002, while a book truncated
+            around a full-range position still reconstructs reserves to within 1.5%.
+            Truncation is caught losslessly by the two identities below, which are
+            exact. So test only: never negative, never exceeding the balance (fees
+            inflate the balance, never the positions).
+            """
             if chain <= 0:
                 return -1e-9 <= model <= 1e-9
-            # Model must never EXCEED the balance (fees inflate the balance, not positions)
-            # and must not fall far short — a large shortfall means the window was too narrow.
-            return 0 <= model <= chain * 1.05 and model >= chain * 0.75
+            return 0 <= model <= chain * 1.001 + 1e-9
+        res0, res1 = self.reserve0 - m0, self.reserve1 - m1
+
+        def explained(residual, pfee):
+            """Share of the model/balance gap that accrued protocol fees account for."""
+            if pfee is None or residual <= 0:
+                return None
+            return min(pfee / residual, 1.0) if residual > 0 else None
+
         return dict(model0=m0, chain0=self.reserve0, model1=m1, chain1=self.reserve1,
                     err0_pct=(m0 / self.reserve0 - 1) * 100 if self.reserve0 else 0.0,
                     err1_pct=(m1 / self.reserve1 - 1) * 100 if self.reserve1 else 0.0,
+                    residual0=res0, residual1=res1,
+                    pfee0=self.pfee0, pfee1=self.pfee1,
+                    explained0=explained(res0, self.pfee0),
+                    explained1=explained(res1, self.pfee1),
                     sum_net=net_all, id_sum_zero=id_sum_zero, id_active_liquidity=id_active,
                     ok=(band(m0, self.reserve0) and band(m1, self.reserve1)
                         and id_sum_zero and id_active),
@@ -254,3 +299,37 @@ class Pool:
 
     def curve(self, sizes):
         return [self.sell(s) for s in sizes]
+
+
+if __name__ == "__main__":
+    import argparse, json
+    from rpc import Client, BASE, BSC, ETH
+    NETS = {"base": BASE, "bsc": BSC, "eth": ETH}
+    p = argparse.ArgumentParser(description="V3 liquidity profile + sell simulator")
+    p.add_argument("--chain", required=True, choices=list(NETS))
+    p.add_argument("--pool", required=True)
+    p.add_argument("--dec0", type=int, required=True, help="token0 decimals — read it, never guess")
+    p.add_argument("--dec1", type=int, required=True, help="token1 decimals")
+    p.add_argument("--sell", type=float, nargs="*", default=[10_000, 100_000, 1_000_000])
+    p.add_argument("--token1", action="store_true",
+                   help="the token you are selling is the pool's token1")
+    p.add_argument("--block", help="hex block to pin to (needs an archive node)")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args()
+    pool = Pool(Client(NETS[a.chain]), a.pool.lower(), a.dec0, a.dec1, block=a.block)
+    sell = pool.sell1 if a.token1 else pool.sell
+    px = pool.price1 if a.token1 else pool.price
+    res = [sell(s) for s in a.sell]
+    if a.json:
+        print(json.dumps({"check": pool.check, "price": px, "sells": res}, indent=1, default=str))
+    else:
+        ck = pool.check
+        print(f"{a.pool}  price {px:,.8g}  ticks {ck['ticks']}  fee {pool.fee/1e4:.2f}%")
+        print(f"  self-check ok={ck['ok']}  sum(liquidityNet)==0: {ck['id_sum_zero']}  "
+              f"below-price==liquidity(): {ck['id_active_liquidity']}")
+        print(f"  model/chain  token0 {ck['model0']:,.6g}/{ck['chain0']:,.6g} ({ck['err0_pct']:+.2f}%)"
+              f"   token1 {ck['model1']:,.6g}/{ck['chain1']:,.6g} ({ck['err1_pct']:+.2f}%)")
+        for r in res:
+            print(f"  sell {r['requested']:>14,.0f}  filled {r['filled']:>14,.0f}  "
+                  f"proceeds {r['proceeds']:>14,.2f}  avg {r['avg']:>12.6g}  "
+                  f"after {r['end_price']:>12.8g}  {r['drawdown_pct']:>7.1f}%  {r['stop']}")

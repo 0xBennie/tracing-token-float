@@ -52,7 +52,7 @@ Work bottom-up. Each layer is worthless if the one below it didn't pass its gate
 
 | Layer | What you produce | Gate before moving on |
 |---|---|---|
-| **L0 Replay** | Local DB of every `Transfer` event; balances rebuilt from flows | Rebuilt balances sum **exactly** to `totalSupply` (wei-precise); zero negative balances; holder count matches the explorer |
+| **L0 Replay** | Local DB of every `Transfer` event; balances rebuilt from flows | **Coverage first:** every block range in `[deploy, snapshot]` was actually answered by a node — a range nobody served is invisible to every check below it. Then: rebuilt balances sum **exactly** to `totalSupply` (wei-precise, negatives included); zero negative balances; holder count matches the explorer |
 | **L1 Distribution** | The genesis tree: deployer EOA → first large transfers → each allocation bucket | Every on-chain bucket reconciles against the published allocation table; discrepancies named |
 | **L1.5 Pool birth** | Who took the initial liquidity, in the block that seeded it | The block that created each pool is read transaction by transaction |
 | **L2 Attribution** | Each material address tagged with an ownership tier (below) | Tiers sum exactly to the float |
@@ -118,7 +118,7 @@ Then state the ratio plainly: **controlled position at mark price, versus total 
 
 For concentrated-liquidity math and the depth simulator: [references/v3-depth.md](references/v3-depth.md).
 
-Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (event replay → SQLite + identity self-check), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator + reserve self-check).
+Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check).
 
 ## Common Mistakes
 
