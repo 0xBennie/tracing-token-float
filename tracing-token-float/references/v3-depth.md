@@ -25,6 +25,21 @@ price(token1 per token0) = (sqrtPriceX96 / 2**96)**2 * 10**(dec0 - dec1)
 sqrtP(tick) = 1.0001 ** (tick / 2)
 ```
 
+## Scan the full range, and budget for it
+
+Word count is `2 × 887272 / tickSpacing / 256`, so the cost is bounded but very uneven:
+
+| tickSpacing | bitmap words | measured |
+|---|---|---|
+| 200 (Aerodrome 0.3%) | ~35 | 59 s |
+| 60 | ~115 | — |
+| 1 (Pancake 0.01%) | ~6,932 | **428 s** |
+
+Seven minutes on a `tickSpacing=1` pool is normal, not a hang. Take it: a windowed scan
+cannot satisfy `sum(liquidityNet) == 0`, and without that identity a truncated book is
+indistinguishable from a real one — it reconstructs plausible reserves and then reports
+the bottom of the scanned range as a price floor.
+
 ## Building the profile
 
 1. `comp = tick // tickSpacing`; `wordPos = comp >> 8`. Python's floor division and arithmetic shift already behave correctly for negative ticks — don't "fix" them.
