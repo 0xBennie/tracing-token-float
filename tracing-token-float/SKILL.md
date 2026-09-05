@@ -68,6 +68,30 @@ python privileges.py --chain bsc 0xTOKEN 0xADAPTER 0xVESTING 0xDISTRIBUTOR
 
 # L7  Market, early. Thin depth makes the percentage academic.
 python scan.py --chain bsc --token 0xTOKEN --also-audit 0xADAPTER --holdings <n>
+
+# L1/L2  Fix the DENOMINATOR before attributing anything. Exclusions are what is not
+#        in the float: vesting, timelock, treasury, unclaimed distributor, escrow.
+python balances.py --db t.db --supply 1000000000 \
+       --exclude 0xVESTING:team-vesting:vesting \
+       --exclude 0xADAPTER:bridge-escrow:bridge_escrow --top 30
+#   Prints the itemised subtraction and asserts it closes in wei. Every percentage it
+#   prints names its denominator; --show ADDR prints one address both ways side by side.
+
+# L5  Keys. Safes that share signers are ONE controller, not several holders.
+python control.py safes --chain bsc --token 0xTOKEN --float <float> 0xSAFE1 0xSAFE2 ...
+python control.py lock  --chain bsc 0xVESTING          # EFFECTIVE lock, not nominal
+
+# L6  Cross-chain, before any percentage. Adding chains up double-counts lock-and-mint.
+python control.py bridge --home eth:0xTOKEN:0xADAPTER --remote bsc:0xTOKEN monad:0xTOKEN
+
+# L7  Whose liquidity is it? Subtract the issuer's own bid from "reachable".
+python positions.py --chain bsc --pool 0xPOOL --issuer 0xLP 0xTREASURY
+
+# L2/L8  The tier table, and the gate that makes it publishable.
+python attribute.py --tiers audit.json --out run1.json
+python attribute.py --tiers audit.json --diff run1.json     # what moved since
+#   close() fails on any gap or double count and prints "Nothing above this line may
+#   be published". The headline is a RANGE; D and M sit outside it by construction.
 ```
 
 Run L0 and the privilege audit before anything else. Either one can make the rest
@@ -146,7 +170,7 @@ Then state the ratio plainly: **controlled position at mark price, versus total 
 
 For concentrated-liquidity math and the depth simulator: [references/v3-depth.md](references/v3-depth.md).
 
-Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check).
+Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/balances.py](scripts/balances.py) (exact rebuild + the float denominator), [scripts/control.py](scripts/control.py) (Safe signer intersection, effective lock period, cross-chain supply), [scripts/positions.py](scripts/positions.py) (V3 liquidity attributed to its real owners), [scripts/attribute.py](scripts/attribute.py) (the tier table and the closure gate), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check).
 
 ## Common Mistakes
 

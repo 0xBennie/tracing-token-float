@@ -89,6 +89,10 @@ tracing-token-float/
     privileges.py           selector extraction from bytecode + live-control proof
     rpc.py                  rotating JSON-RPC; separate endpoint pools for historical logs
     replay.py               parallel event replay into SQLite + the coverage and supply gates
+    balances.py             exact rebuild, and the float denominator that closes in wei
+    control.py              Safe signer intersection, effective lock, cross-chain supply
+    positions.py            V3 liquidity attributed to owners; third-party reachable quote
+    attribute.py            the tier table, the closure gate, and the re-audit diff
     lineage.py              weighted provenance, net-flow, first-funder
     depth.py                V3 profile, structural identities, sell simulator (both directions)
 ```
