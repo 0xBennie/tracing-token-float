@@ -46,6 +46,34 @@ If a mint path exists outside the bridge logic, "who controls the float" is the 
 question — they can print. This also decides whether `totalSupply()` is an invariant the
 identity gates below may rest on.
 
+## The Runbook
+
+The layer table below says what each layer produces. This says what to actually type.
+Every step is gated: a non-zero exit means STOP, not "note it and continue".
+
+```bash
+cd scripts
+
+# L0  Replay, then certify. Two gates, and they are not the same gate.
+python replay.py --rpc bsc --token 0xTOKEN --from-block <deploy> --db t.db --workers 4
+python replay.py --db t.db --verify --rpc bsc          # exit 0 = CERTIFIED
+#   exit 1 -> a range is missing or the supply identity failed. Re-run the line above;
+#             it fetches only what ranges_done does not already cover.
+#   exit 3 -> it REFUSED to certify (no bounds recorded, or no --rpc). Not a pass.
+# Nothing below this line means anything until this exits 0.
+
+# Privileges, before any percentage. Audit every contract that HOLDS or MOVES the
+# token, never just the token — the escrow nobody opens is where a sweep() lives.
+python privileges.py --chain bsc 0xTOKEN 0xADAPTER 0xVESTING 0xDISTRIBUTOR
+
+# L7  Market, early. Thin depth makes the percentage academic.
+python scan.py --chain bsc --token 0xTOKEN --also-audit 0xADAPTER --holdings <n>
+```
+
+Run L0 and the privilege audit before anything else. Either one can make the rest
+academic: a live mint path means they can print, and a book that absorbs $30k means
+the float percentage is a rounding error on the real answer.
+
 ## The Chain
 
 Work bottom-up. Each layer is worthless if the one below it didn't pass its gate.
