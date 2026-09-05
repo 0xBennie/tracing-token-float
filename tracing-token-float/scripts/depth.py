@@ -205,7 +205,10 @@ class Pool:
         price that no one could ever get.
         """
         total = amount0 * 10 ** self.d0
-        rem, out = total, 0.0
+        # Track what was CONSUMED, never total-minus-remainder. Differencing two nearly
+        # equal floats reported filled=0.000000 on a true fill of 0.004073 when the probe
+        # size dwarfed the book — and the drain probe is deliberately such a size.
+        rem, out, used = total, 0.0, 0.0
         sqrtP, L, f = self.sqrtP, float(self.L0), self.fee / 1e6
         cap = self.reserve1 * 10 ** self.d1
         capped = False
@@ -223,17 +226,19 @@ class Pool:
                 seg = L * (sqrtP - end)
                 if out + seg >= cap:                      # quote runs out inside this step
                     end = sqrtP - (cap - out) / L
-                    rem -= L * (1 / end - 1 / sqrtP) / (1 - f)
+                    d = L * (1 / end - 1 / sqrtP) / (1 - f)
+                    rem -= d; used += d
                     out, sqrtP, capped = cap, end, True
                     break
                 out += seg
                 if after_fee < dx:                        # order fills inside this step
+                    used += rem
                     sqrtP, rem = end, 0
                     break
-                rem -= dx / (1 - f)
+                rem -= dx / (1 - f); used += dx / (1 - f)
             sqrtP = sn
             L -= self.net[t]
-        filled = (total - max(rem, 0)) / 10 ** self.d0
+        filled = min(used, total) / 10 ** self.d0
         proceeds = out / 10 ** self.d1
         end_px = sqrtP ** 2 * 10 ** (self.d0 - self.d1)
         return dict(requested=amount0, filled=filled, proceeds=proceeds,
@@ -251,10 +256,10 @@ class Pool:
         A token is token1 whenever its address sorts above its quote asset's, which
         is arbitrary — so half of all tokens can only be sold in this direction. The
         book walks UP: adding token1 makes token0 scarcer, sqrtPrice rises, and the
-        token1-denominated price (1/P) falls. Liquidity crossings flip sign too.
+        token0-denominated price of token1 (1/P) falls. Liquidity crossings flip sign too.
         """
         total = amount1 * 10 ** self.d1
-        rem, out = total, 0.0
+        rem, out, used = total, 0.0, 0.0
         sqrtP, L, f = self.sqrtP, float(self.L0), self.fee / 1e6
         cap = self.reserve0 * 10 ** self.d0
         capped = False
@@ -272,17 +277,19 @@ class Pool:
                 seg = L * (1 / sqrtP - 1 / end)           # token0 paid out
                 if out + seg >= cap:                      # token0 side runs dry
                     end = 1 / (1 / sqrtP - (cap - out) / L)
-                    rem -= L * (end - sqrtP) / (1 - f)
+                    d = L * (end - sqrtP) / (1 - f)
+                    rem -= d; used += d
                     out, sqrtP, capped = cap, end, True
                     break
                 out += seg
                 if after_fee < dy:
+                    used += rem
                     sqrtP, rem = end, 0
                     break
-                rem -= dy / (1 - f)
+                rem -= dy / (1 - f); used += dy / (1 - f)
             sqrtP = sn
             L += self.net[t]
-        filled = (total - max(rem, 0)) / 10 ** self.d1
+        filled = min(used, total) / 10 ** self.d1
         proceeds = out / 10 ** self.d0
         end_px = 1 / (sqrtP ** 2 * 10 ** (self.d0 - self.d1))
         return dict(requested=amount1, filled=filled, proceeds=proceeds,
@@ -297,8 +304,12 @@ class Pool:
         """Price of token1 denominated in token0."""
         return 1 / self.price
 
-    def curve(self, sizes):
-        return [self.sell(s) for s in sizes]
+    def curve(self, sizes, token1=False):
+        """Depth curve. Pass token1=True when the token you are selling is the pool's
+        token1 — otherwise this charts the wrong side of the book for half of all
+        tokens, silently."""
+        f = self.sell1 if token1 else self.sell
+        return [f(s) for s in sizes]
 
 
 if __name__ == "__main__":

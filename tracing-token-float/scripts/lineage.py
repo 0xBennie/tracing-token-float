@@ -91,3 +91,55 @@ def balance_exact(cur, a, table="transfers"):
     i = sum(int(v) for (v,) in cur.execute(f"SELECT val FROM {table} WHERE dst=?", (a,)))
     o = sum(int(v) for (v,) in cur.execute(f"SELECT val FROM {table} WHERE frm=?", (a,)))
     return i - o
+
+
+if __name__ == "__main__":
+    import argparse, json, sqlite3, sys
+    sys.stdout.reconfigure(line_buffering=True)
+    p = argparse.ArgumentParser(description="weighted provenance / net-flow / first-funder")
+    p.add_argument("--db", required=True)
+    p.add_argument("--table", default="transfers")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    t = sub.add_parser("trace", help="propagate a balance backward by amount share")
+    t.add_argument("address")
+    t.add_argument("--terminals", required=True,
+                   help="JSON file or inline JSON: {\"0xaddr\": \"label\", ...}")
+    t.add_argument("--max-hop", type=int, default=4)
+    t.add_argument("--min-share", type=float, default=0.01)
+
+    n = sub.add_parser("netflow", help="net token flow between two addresses")
+    n.add_argument("a"); n.add_argument("b")
+
+    f = sub.add_parser("funder", help="who sent this address its first tokens")
+    f.add_argument("address")
+
+    b = sub.add_parser("balance", help="exact wei balance from the replayed ledger")
+    b.add_argument("address")
+
+    a = p.parse_args()
+    cur = sqlite3.connect(a.db).cursor()
+
+    if a.cmd == "trace":
+        try:
+            terms = json.loads(a.terminals)
+        except json.JSONDecodeError:
+            terms = json.load(open(a.terminals))
+        terms = {k.lower(): v for k, v in terms.items()}
+        r = trace(cur, a.address.lower(), terms, a.max_hop, a.min_share, a.table)
+        for k, v in sorted(r.items(), key=lambda kv: -kv[1]):
+            print(f"  {v*100:6.2f}%  {k}")
+        # A large cycle/pool share is the signal that this method does not apply here.
+        churn = sum(v for k, v in r.items() if k.startswith("cycle@") or "pool" in k.lower())
+        if churn > 0.25:
+            print(f"\n  !! {churn*100:.1f}% of provenance dissolved into this address's own")
+            print("     churn. Weighted lineage does not apply to an actively trading")
+            print("     address — use net-flow against known issuer addresses, the")
+            print("     first-funding transfer, or timing evidence instead.")
+    elif a.cmd == "netflow":
+        print(json.dumps(net_flow(cur, a.a.lower(), a.b.lower(), a.table), indent=1))
+    elif a.cmd == "funder":
+        print(json.dumps(first_funder(cur, a.address.lower(), a.table), indent=1, default=str))
+    elif a.cmd == "balance":
+        wei = balance_exact(cur, a.address.lower(), a.table)
+        print(f"{wei} wei  ({wei / 10**18:,.6f} @ 18 dec)")

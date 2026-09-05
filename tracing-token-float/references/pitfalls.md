@@ -271,6 +271,18 @@ Chain constants drift and reference values go stale. Both failures below shipped
 - **Block time**: "BSC ≈0.75 s" was recalled; the measured value across four anchor blocks
   was **0.4502 s** — a 67% error that miscomputed every "days since last activity" on that
   chain. Take two block timestamps and divide. Better: pass **head timestamps** downstream
+
+  Re-measured 2026-09-05 over three windows each, and quoted here only so you can see the
+  spread you are up against — **re-measure, do not cite this table**. BSC has already
+  changed twice:
+
+  | chain | s/block | note |
+  |---|---|---|
+  | BSC | 0.4500 | was 3 s, then 0.75 s, now 0.45 — any recalled value is wrong |
+  | Base | 2.0000 | stable |
+  | Ethereum | 12.04–12.06 | 12 s nominal; the excess is missed slots |
+
+  Two timestamps and a subtraction cost one RPC call. A recalled constant costs a rewrite
   rather than a seconds-per-block figure, so consumers cannot re-derive it wrongly.
 - **Price**: a cached registry file was quoted as spot. It was five months old and the token
   had fallen 82%. Read price from the pool's `slot0` at a stated block, or stamp the file
