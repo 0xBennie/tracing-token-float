@@ -166,7 +166,14 @@ class Client:
             except Exception as e:
                 last = f"{url}: {e}"
             time.sleep(0.4 * (k + 1))
-        raise RuntimeError(f"batch failed :: {last}")
+        # Every endpoint refused or mangled the batch. Serial is slower by the
+        # batch factor but returns the same answer; raising here would abort a
+        # depth run that was one retry from finishing. Callers must never have to
+        # choose between "batching works" and "no data".
+        try:
+            return [self.call(m, p) for m, p in reqs]
+        except Exception as e:
+            raise RuntimeError(f"batch failed :: {last} ; serial fallback also failed :: {e}")
 
     def eth_call(self, to, data, block="latest"):
         return self.call("eth_call", [{"to": to, "data": data}, block])
