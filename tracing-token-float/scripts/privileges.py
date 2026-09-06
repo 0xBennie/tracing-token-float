@@ -126,7 +126,42 @@ def _is_auth_refusal(r):
     return any(k in r["msg"].lower() for k in AUTH_STRINGS)
 
 
-def probe_callable(c, addr, sel, owner, arg=None):
+def encode_args(sig, addr_val):
+    """ABI-encode a plausible argument list from a selector's own signature.
+
+    One padded word is NOT enough. `withdrawPool(address,address)` needs two,
+    `sweepToken(address,uint256,address)` three, and a call whose calldata is
+    short falls through the dispatcher into the fallback — which reverts for
+    owner and stranger *identically*, so the probe reports INCONCLUSIVE and a
+    live escape hatch reads as absent. Arity comes from the signature we already
+    store next to every selector; there is no need to guess it.
+
+    Values are chosen to reach the auth guard rather than trip an earlier check:
+    a nonzero amount, the owner in every address slot, empty tails for dynamic
+    types. The verdict never depends on these succeeding — only on owner and
+    stranger failing *differently*.
+    """
+    inner = sig[sig.index("(") + 1:sig.rindex(")")]
+    types = [t.strip() for t in inner.split(",") if t.strip()]
+    head, tail = [], []
+    off = len(types) * 32
+    for t in types:
+        if t in ("bytes", "string") or t.endswith("[]"):
+            head.append(f"{off:064x}")
+            tail.append(f"{0:064x}")          # zero-length tail
+            off += 32
+        elif t == "address":
+            head.append(addr_val[2:].lower().rjust(64, "0"))
+        elif t == "bool":
+            head.append(f"{0:064x}")
+        elif t.startswith(("uint", "int")):
+            head.append(f"{1:064x}")          # nonzero: a 0 amount can early-return
+        else:                                  # bytes32 and friends
+            head.append(f"{0:064x}")
+    return "".join(head) + "".join(tail)
+
+
+def probe_callable(c, addr, sel, owner, arg=None, sig=None):
     """Is this a live unilateral control path, and is everyone else locked out?
 
     Three probes, because any one alone lies:
@@ -138,12 +173,16 @@ def probe_callable(c, addr, sel, owner, arg=None):
     function commonly still reverts for the owner under simulation — on a later
     precondition, a zero-value transfer, a paused check — so requiring success
     would report every real escape hatch as absent.
+
+    All three probes carry the same calldata shape, so a difference in outcome
+    can only come from the selector or the caller, never from the encoding.
     """
     STRANGER = "0x1111111111111111111111111111111111111111"
-    argw = (arg or owner)[2:].rjust(64, "0")
-    ctl = _raw_call(c, addr, "0xdeadbeef" + argw, owner)
-    own = _raw_call(c, addr, sel + argw, owner)
-    stranger = _raw_call(c, addr, sel + argw, STRANGER)
+    sig = sig or (DANGEROUS.get(sel, ("f(address)",))[0])
+    args = encode_args(sig, arg or owner)
+    ctl = _raw_call(c, addr, "0xdeadbeef" + args, owner)
+    own = _raw_call(c, addr, sel + args, owner)
+    stranger = _raw_call(c, addr, sel + args, STRANGER)
     if ctl["ok"]:
         return "INCONCLUSIVE (fallback accepts anything)"
     if _is_auth_refusal(stranger) and not _is_auth_refusal(own):
