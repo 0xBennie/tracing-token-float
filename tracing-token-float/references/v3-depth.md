@@ -84,6 +84,28 @@ Two stopping conditions matter as much as the loop:
 
 Floating point is adequate here — `L` around 10^20–10^23 stays well inside float64 precision, and the answer is a risk estimate, not a settlement figure.
 
+### Selling token1 — the other half, and you will need it
+
+Whether the token you are auditing is `token0` or `token1` is decided by address ordering, not by importance. Roughly half of all pools put it second, and a simulator that only walks downward silently reports **zero depth** for those — which reads as "no exit liquidity" when the truth may be the opposite. `depth.py` exposes both (`sell` / `sell1`, and `curve(sizes, token1=True)`); check `token0()` against your token before quoting a number.
+
+Selling token1 moves price **up**, so the loop mirrors:
+
+```
+dy_max  = L * (sqrtP_next - sqrtP)             # token1 the segment absorbs
+if remaining * (1-f) < dy_max:                 # fills inside the segment
+    sqrtP_end = sqrtP + remaining*(1-f)/L
+    out += L * (1/sqrtP - 1/sqrtP_end)         # output is token0
+    done
+else:
+    out += L * (1/sqrtP - 1/sqrtP_next)
+    remaining -= dy_max / (1-f)
+    cross: sqrtP = sqrtP_next; L += liquidityNet[tick_next]
+```
+
+Note the two sign flips that are easy to miss: the tick crossing **adds** `liquidityNet` going up (it subtracts going down), and the output accumulator uses the reciprocal form. Getting one right and the other wrong produces a curve that looks plausible and is wrong by the width of the range.
+
+The stopping conditions swap accordingly: cumulative output cannot exceed the pool's **token0** balance, and above the highest initialized tick there are no asks left.
+
 ## Reporting
 
 For each size, report: requested, **actually fillable**, proceeds, average price, post-trade price, drawdown. Then aggregate across every pool on every chain into one figure — **total reachable quote currency** — and set it beside the position's mark-price valuation.
