@@ -357,6 +357,58 @@ Related: never skip `raise_for_status()`. A 429 or 503 carrying a JSON body pars
 normal reply, so the run ends blaming the data instead of the rate limit — and a
 `{"result": null}` handed back to a caller expecting a list crashes somewhere unrelated.
 
+## 25. SQL string-slicing a wei amount silently truncates it
+
+Token amounts do not fit in SQLite's INTEGER. The habit that grows out of that is to
+slice the decimal string instead — `CAST(SUBSTR(val, 1, LENGTH(val)-18) AS INTEGER)` to
+turn wei into whole tokens. It is fast, it is used in every aggregate, and it is lossy in
+two ways at once:
+
+- It **floors** every row. Across 1.16M transfers the dropped fractions are not noise;
+  they are a systematic downward bias that grows with row count, and they never cancel
+  because truncation only ever rounds one way.
+- Any amount **below 1 token** becomes `0` — an entire class of transfers (dust probes,
+  the `10.00` test transfer that reveals a shell chain, per-user airdrop remainders)
+  aggregates to nothing and disappears from the analysis that was supposed to find it.
+
+Use string slicing only for ranking and eyeballing. Every number that reaches a
+deliverable must be summed with Python `int()` over the raw wei and divided once at the
+end. When both appear in one report, say which is which: a headline that is 0.3% below
+the exact figure is indistinguishable from a real discrepancy, and you will spend a day
+chasing it.
+
+## 26. A refusal is not a data point
+
+Three different things arrive looking alike: the node answered "there is nothing here",
+the node refused to answer, and the node was never asked because a worker died. Only the
+first is data. Fold the other two into it and the analysis reports absence of evidence as
+evidence of absence — no pool, no transfers, no privileged function.
+
+- `eth_getLogs` returning `[]` is a claim about the chain. `result: null`, a timeout, or
+  an exception is a claim about the node. Never write the second into a coverage table.
+- An `eth_call` that reverts tells you something. An `eth_call` that was rate-limited
+  tells you nothing — and if you treat the empty return as "function absent", a live
+  escape hatch reads as safe.
+- Count refusals separately and **print the count**. A run that answered 13 of 20 windows
+  and a run that answered 20 of 20 must not produce the same-looking report.
+
+The rule that follows: when a required probe cannot be answered, exit non-zero rather
+than emit a number. A missing conclusion is recoverable; a confident wrong one is not.
+
+## 27. Concurrency has a ceiling set by the node, not by your CPU
+
+Raising worker count past what the endpoint tolerates does not speed a scan up — it
+converts successful windows into 429s, which the retry path then re-queues, which
+produces more 429s. Throughput peaks well before the failure rate does, so the run gets
+slower *and* its coverage table starts filling with refusals that look like empty ranges
+(see #26).
+
+Two limits worth respecting: keep JSON-RPC batches at or below ~120 items, and keep
+in-flight requests per endpoint in the single digits. Prefer more endpoints over more
+threads per endpoint. Measure once with a small scan: if doubling workers does not
+roughly halve wall-clock, you are already past the ceiling and everything above it is
+being paid for in retries.
+
 ## Quick self-checks
 
 | Check | Passes when |
@@ -375,3 +427,6 @@ normal reply, so the run ends blaming the data instead of the rate limit — and
 | Constants | Block time and price measured at a stated block, not recalled or read from cache |
 | Privileges | Every contract that holds or moves the token audited — adapter, vesting factory, distributor — not just the token; each live path named with its holder and threshold |
 | Cross-chain labels | No address tagged as issuer on one chain and untagged on another |
+| Wei arithmetic | Every published figure summed with `int()` over raw wei; string-sliced values used only for ranking, and labelled as such |
+| Refusals counted | Windows answered vs. windows asked printed; no refusal folded into "empty" |
+| Market-maker bucket | Test-transfer, pre-pool-arrival and return-to-treasury all checked before any desk is called independent |
