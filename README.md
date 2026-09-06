@@ -109,20 +109,19 @@ cp -r tracing-token-float/tracing-token-float ~/.claude/skills/
 > The repository is currently **private**, so that clone only works for accounts with
 > access.
 
-### Before making this public
+### On the case study
 
-`case-study/` — the audit this skill was distilled from — is **no longer tracked**. It
-names a real project, quotes its contract addresses, and documents a live `sweep()` path
-on its bridge adapter; none of that should ship with a general-purpose tool. It stays on
-disk for reference and is listed in `.gitignore`.
+`case-study/` — the audit this skill was distilled from — is **not in this repository**,
+and never was as far as its history is concerned. It names a real project, quotes its
+contract addresses, and documents a live `sweep()` path on its bridge adapter; none of
+that belongs in a general-purpose tool.
 
-Untracking removes it from `HEAD`, **not from history**. Earlier commits still contain
-every file. Going public therefore needs one of:
+It was removed from every commit with `git filter-repo --path case-study --invert-paths`
+on 2026-09-06 and both branches force-pushed. A mirror clone confirms zero commits, zero
+trees and zero blobs referencing it. The directory stays on the author's disk and is
+listed in `.gitignore`, so it cannot drift back in.
 
-- `git filter-repo --path case-study --invert-paths` followed by a force-push, or
-- a fresh repository initialised from the current tree.
-
-Do that before flipping visibility, not after.
+Nothing further is required before making this repository public.
 
 Codex, Copilot CLI and Gemini CLI also read `~/.agents/skills/`.
 
