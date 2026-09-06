@@ -17,7 +17,7 @@ Every number this prints is a floor, and it says so: pools it could not read are
 counted and named, non-dollar quote assets are never silently converted, and a
 token audited without --also-audit gets a caveat rather than a clean bill.
 """
-import argparse, sys, json
+import argparse, sys, json, collections
 from rpc import Client, BASE, BSC, ETH, LOG_EPS
 from privileges import audit, safe_control
 from depth import Pool, InconsistentState
@@ -52,7 +52,19 @@ STABLES = {
 }
 
 
-def discover_pools(c, token, lookback=40_000, chunk=2_000, cap=400, logc=None):
+def block_time(c, span=5_000):
+    """Measured seconds per block. Never assume it: BSC is 0.75s and Base is 2s, so a
+    fixed block `lookback` covers 2.7x more history on one than the other and the same
+    default silently means different things per chain."""
+    head = c.block_number()
+    lo = max(0, head - span)
+    t1 = int(c.call("eth_getBlockByNumber", [hex(head), False])["timestamp"], 16)
+    t0 = int(c.call("eth_getBlockByNumber", [hex(lo), False])["timestamp"], 16)
+    return max((t1 - t0) / max(head - lo, 1), 0.05)
+
+
+def discover_pools(c, token, lookback=None, chunk=2_000, cap=400, logc=None,
+                   window_sec=24 * 3600):
     """Find V3-style pools by asking recent counterparties whether they have slot0().
 
     Log queries go through their own endpoint pool: the general pool contains nodes
@@ -60,10 +72,26 @@ def discover_pools(c, token, lookback=40_000, chunk=2_000, cap=400, logc=None):
     answers "the method eth_getLogs is not supported"). Mixing them made 7 of 20
     discovery windows return nothing, silently, so a third of the counterparty set —
     and any pool reachable only through it — was never probed.
+
+    Two things the obvious version gets wrong:
+
+    - `lookback` in blocks means a different amount of history on every chain. It is
+      derived here from a measured block time so `window_sec` means what it says.
+    - Ranking candidates by `sorted(addresses)` is ranking by hex prefix, i.e. at
+      random, and then truncating at `cap` throws away real pools while keeping dust
+      that happens to start with 0x0. A pool is by construction one of the *most
+      frequent* counterparties, so rank by appearance count and probe the top `cap`.
+      For the same reason the window scan no longer stops early on `cap`: breaking out
+      biases the counterparty set toward whichever windows ran first.
     """
     logc = logc or c
     head = c.block_number()
-    seen, pools = set(), []
+    if lookback is None:
+        bt = block_time(c)
+        lookback = max(chunk, int(window_sec / bt))
+        print(f"     block time {bt:.2f}s → lookback {lookback:,} blocks "
+              f"for {window_sec/3600:.0f}h")
+    seen, pools = collections.Counter(), []
     print(f"     discovering pools: blocks {head - lookback:,}–{head:,} "
           f"({lookback // chunk} windows)")
     missed = 0
@@ -80,15 +108,15 @@ def discover_pools(c, token, lookback=40_000, chunk=2_000, cap=400, logc=None):
                   f"#{lo:,}–#{min(lo+chunk-1, head):,} were never seen")
             continue
         for l in logs:
-            for t in l["topics"][1:3]:
+            for t in (l.get("topics") or [])[1:3]:
                 a = "0x" + t[-40:]
                 if int(a, 16) > 1:
-                    seen.add(a)
+                    seen[a] += 1
         print(f"     window {i}  {len(seen):,} counterparties seen")
-        if len(seen) > cap:
-            print(f"     stopping at cap={cap} — counterparties beyond this window are NOT probed")
-            break
-    cands = sorted(seen)[:cap]
+    cands = [a for a, _ in seen.most_common(cap)]
+    if len(seen) > cap:
+        print(f"     {len(seen):,} counterparties → probing the {cap} most frequent; "
+              f"tail cut at {seen.most_common(cap)[-1][1]} appearances")
     print(f"     probing {len(cands):,} addresses for slot0()")
     for i in range(0, len(cands), 60):
         ch = cands[i:i + 60]
@@ -106,7 +134,7 @@ def discover_pools(c, token, lookback=40_000, chunk=2_000, cap=400, logc=None):
                 pools.append(a)
     print(f"     {len(pools)} V3-style pool(s) found"
           + (f"  ({missed} discovery window(s) never answered)" if missed else "") + "\n")
-    return pools, missed
+    return pools, missed, lookback
 
 
 def decimals(c, tok):
@@ -142,8 +170,13 @@ def main():
                    help="bridge adapters, vesting factories, distributors — audit these too")
     p.add_argument("--holdings", type=float, default=None,
                    help="token count whose paper value to compare against exit liquidity")
-    p.add_argument("--lookback", type=int, default=40_000,
-                   help="blocks of Transfer history to mine for pool candidates (default 40000)")
+    p.add_argument("--lookback", type=int, default=None,
+                   help="blocks of Transfer history to mine for pool candidates. "
+                        "Default: derived from measured block time so the window is "
+                        "--window-hours of real time on any chain")
+    p.add_argument("--window-hours", type=float, default=24.0,
+                   help="hours of Transfer history to mine when --lookback is not given "
+                        "(default 24)")
     p.add_argument("--quote-price", nargs="*", default=[], metavar="SYM=USD",
                    help="price a non-stable quote asset, e.g. WETH=3400 — without this, "
                         "pools quoted in it are reported but never folded into a $ total")
@@ -200,8 +233,11 @@ def main():
     print("[2] EXIT LIQUIDITY — what the book can actually absorb\n")
     if a.pools:
         pools, disc_missed, explicit = [x.lower() for x in a.pools], 0, True
+        eff_lookback = None
     else:
-        pools, disc_missed = discover_pools(c, tok, a.lookback, logc=Client(LOG_EPS[a.chain]))
+        pools, disc_missed, eff_lookback = discover_pools(
+            c, tok, a.lookback, logc=Client(LOG_EPS[a.chain]),
+            window_sec=a.window_hours * 3600)
         explicit = False
     if not pools:
         print("  no V3-style pools found. The token may trade only on V2-style pools")
@@ -284,7 +320,7 @@ def main():
     # ratio quoted over a subset reads exactly like one quoted over the whole market.
     print(f"  pools discovered {len(pools)}   measured {len(rows)}   skipped {len(skipped)}")
     if not explicit:
-        print(f"     ! discovery only mined the last {a.lookback:,} blocks of Transfers. A pool")
+        print(f"     ! discovery only mined the last {eff_lookback:,} blocks of Transfers. A pool")
         print(f"       with no recent activity is invisible to it — pass --pools to be sure.")
     if disc_missed:
         print(f"     ! {disc_missed} discovery window(s) never answered — pools whose only")
