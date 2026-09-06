@@ -107,8 +107,22 @@ cp -r tracing-token-float/tracing-token-float ~/.claude/skills/
 ```
 
 > The repository is currently **private**, so that clone only works for accounts with
-> access. It also carries `case-study/`, which names a real project — split or redact
-> that directory before making the repo public.
+> access.
+
+### Before making this public
+
+`case-study/` — the audit this skill was distilled from — is **no longer tracked**. It
+names a real project, quotes its contract addresses, and documents a live `sweep()` path
+on its bridge adapter; none of that should ship with a general-purpose tool. It stays on
+disk for reference and is listed in `.gitignore`.
+
+Untracking removes it from `HEAD`, **not from history**. Earlier commits still contain
+every file. Going public therefore needs one of:
+
+- `git filter-repo --path case-study --invert-paths` followed by a force-push, or
+- a fresh repository initialised from the current tree.
+
+Do that before flipping visibility, not after.
 
 Codex, Copilot CLI and Gemini CLI also read `~/.agents/skills/`.
 
