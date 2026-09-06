@@ -21,24 +21,31 @@ WEI = 1e18
 def trace(cur, target, terminals, max_hop=4, min_share=0.01, table="transfers"):
     """cur: sqlite cursor over transfers(frm, dst, val).
     terminals: {address: label} — stop and attribute when reached.
-    Returns {label: share} summing to ~1.0."""
+    Returns {label: share} summing to ~1.0.
+
+    A cycle is a node appearing in its *own* ancestry, not a node reached twice.
+    Two funding paths converging on one exchange is the normal shape of a token's
+    history; a global `seen` set calls that a cycle and books real issuer lineage
+    under `cycle@…`, which understates attribution by however much converged.
+    So the frontier is keyed by (node, ancestors) and only a genuine self-loop is
+    charged to `cycle@`. Branch count stays bounded by `min_share` pruning.
+    """
     agg = collections.Counter()
-    frontier = {target.lower(): 1.0}
     terminals = {k.lower(): v for k, v in terminals.items()}
-    seen = set()
+    t0 = target.lower()
+    frontier = {(t0, frozenset()): 1.0}
     for hop in range(max_hop):
         nxt = collections.Counter()
-        for node, w in frontier.items():
+        for (node, anc), w in frontier.items():
             if w < min_share:
                 agg["<diluted, not traced>"] += w
                 continue
             if hop and node in terminals:
                 agg[terminals[node]] += w
                 continue
-            if node in seen:
+            if node in anc:                       # node is its own ancestor: real churn
                 agg[f"cycle@{node[:10]}…"] += w
                 continue
-            seen.add(node)
             rows = cur.execute(
                 f"SELECT frm, SUM(CAST(val AS REAL)) FROM {table} WHERE dst=? GROUP BY frm",
                 (node,)).fetchall()
@@ -46,12 +53,13 @@ def trace(cur, target, terminals, max_hop=4, min_share=0.01, table="transfers"):
             if not tot:
                 agg[f"no inflow@{node[:10]}…"] += w
                 continue
+            anc2 = anc | {node}
             for frm, v in rows:
-                nxt[frm] += w * (v / tot)
+                nxt[(frm, anc2)] += w * (v / tot)
         frontier = dict(nxt)
         if not frontier:
             break
-    for node, w in frontier.items():
+    for (node, _anc), w in frontier.items():
         agg[terminals.get(node, f"unresolved@{node[:10]}…")] += w
     return dict(agg)
 
