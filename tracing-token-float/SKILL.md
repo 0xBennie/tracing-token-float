@@ -132,7 +132,16 @@ Never merge these. Report them separately and let the reader choose their own ha
 - **B — Lineage-traced.** Every token arrived, within N hops, from a Tier A address and never touched a market. Strong.
 - **C — Issuer-funded liquidity.** Tokens sitting inside LP positions the issuer owns. Real but not freely sellable.
 - **D — Assumed.** Dormant airdrop recipients, "probably the team." **State it as an assumption and keep it out of the headline number.** Publishing D as fact is how analyses get discredited.
-- **M — Market makers.** Not resolvable on-chain: a MM's inventory may be the issuer's, borrowed from the issuer, or its own. Give it its own bucket and say plainly that resolving it needs off-chain agreements. Forcing it to either side destroys the number.
+- **M — Market makers.** A MM's inventory may be the issuer's, borrowed from it, or its own. Give it its own bucket — but **M is a starting bucket, not a verdict**. Try to empty it before you publish it.
+
+  A one-hop test between issuer and desk returning zero does not mean independence; it means you have not looked at hop two. Shell chains are built precisely to make hop one clean. What resolves M on-chain:
+  - **A test transfer before the real one.** `10.00` then `~1.4 million` from the same sender, minutes apart, at every hop. Nobody sanity-checks an address they do not control the other end of.
+  - **Arrival before the pool exists.** Inventory in place N blocks *before* the pool is created is not a desk that bought in; it was positioned.
+  - **Return flow to the issuer's treasury.** An independent desk does not send inventory back to the issuer's multisig. This is the single strongest signal, and it is a direction question, not a net-flow question.
+
+  In the audit this skill came from, all three held and roughly 1.5 million tokens moved from "third-party desk" to the issuer's side — the only reclassification that changed the headline. Publishing M as unresolvable would have understated issuer control by about a point of float.
+
+  Say "unresolvable" only after those three come back negative, and say which ones you checked.
 
 **Report a range, never a point estimate.** Tier A alone is your defensible floor; A+B (+C) is the ceiling. A single decimal invites the issuer to rebut one address and dismiss the whole analysis; a range with tiered evidence survives losing any individual call.
 
