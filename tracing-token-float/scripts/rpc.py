@@ -24,22 +24,34 @@ BSC = ["https://bsc-dataseed.bnbchain.org", "https://bsc-rpc.publicnode.com",
        "https://bsc-dataseed1.defibit.io", "https://bsc.drpc.org"]
 ETH = ["https://eth.llamarpc.com", "https://ethereum-rpc.publicnode.com", "https://rpc.ankr.com/eth"]
 
-# Endpoints for HISTORICAL eth_getLogs. blxrbdn leads on BSC because it was the only
-# free endpoint that answered a full historical replay when every dataseed refused.
-# Measured 2026-09-05 by querying windows with a known log count and comparing the
-# returned (blockNumber, logIndex) sets across providers. MAX_SPAN is not a preference,
-# it is the largest window the endpoint actually serves — exceed it on BSC and blxrbdn
-# times out at exactly 30s, deterministically. That is the root cause of the 126/1383
-# ranges that once went missing.
+# Endpoints for HISTORICAL eth_getLogs, keyed by chain — every entry qualified by
+# querying windows with a known log count and comparing the returned
+# (blockNumber, logIndex) sets across providers. Qualify, don't assume: a pruned node
+# answers a range it cannot serve with `{"result": []}`, byte-identical to a genuinely
+# quiet range.
 LOG_EPS = {
-    # blxrbdn is the only free BSC endpoint that serves bulk historical getLogs.
-    #   span 500/1000/2000 -> 0% failure;  span 3000/5000 -> 100% failure (30s timeout)
-    #   archive floor: block 65,125,025 (2025-10-19). Below that it cannot help.
-    # blockrazor caps at 25 blocks and only reaches back ~2 months, but it agreed with
-    # blxrbdn exactly on every window tested — keep it as an independent cross-check.
+    # nodereal's public-key endpoint is a TRUE archive for eth_getLogs across all of
+    # BSC history. Qualified 2026-09-08 against WBNB Transfer logs in 10-block windows
+    # at blocks 45M/50M/55M/56M/58M/59M/60M/62M/66M/80M/100M/120M — all non-empty —
+    # and it matched blxrbdn log-for-log on 66,000,000-66,001,999 (476/476).
+    #   two separate caps, and BOTH say so explicitly instead of truncating:
+    #     block range   50,000  -> "exceed maximum block range: 50000"
+    #     result count  50,000  -> "logs count exceeds the limit 50000"
+    #   throughput: a 50,000-block span answers in ~3.4s, but the ceiling is
+    #   CONCURRENCY, not span — 8 workers 429'd every window, 2 workers ran 61.1M
+    #   blocks clean. Sustained serial rate on dense history is ~0.07 windows/s, so
+    #   a 10M-transfer replay is an hours-long job however you slice it.
+    #
+    # This REPLACES an earlier claim in this file that blxrbdn was the only free BSC
+    # endpoint serving bulk historical getLogs. It was not, and worse, blxrbdn has an
+    # archive floor around block 66M (2025-10-19) — it cannot serve a token deployed
+    # before that date at all, which is most of them. It stays in XCHECK_EPS below.
+    #
     # NOTE bsc.publicnode.com and bsc-rpc.publicnode.com are ONE backend, not two
-    # sources, and both 403 on anything historical.
-    "bsc":  ["https://bsc.rpc.blxrbdn.com"],
+    # sources, and both 403 on anything historical. blastapi and zan.top are true
+    # archives for eth_call/eth_getCode (use them for a deploy-block bisect) but their
+    # free tier refuses eth_getLogs outright with HTTP 429 at any span.
+    "bsc":  ["https://bsc-mainnet.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3"],
     # drpc serves 5,000-block spans in ~1.3s and matched every reference set.
     # mainnet.base.org is a true archive but has a response-SIZE cap, so it rejects a
     # dense 200-block window while serving a quiet 5,000-block one — it says so loudly.
@@ -47,9 +59,20 @@ LOG_EPS = {
     "eth":  ETH,
 }
 
+# A SECOND, independent provider per chain, for the one job that cannot be done with a
+# single endpoint: confirming that an empty or suspiciously round result is the chain's
+# answer and not the node's. Deliberately NOT in LOG_EPS — that dict is indexed by chain
+# name (LOG_EPS[a.chain]) and a non-chain key in it breaks the first caller to iterate it.
+# blockrazor caps at 25 blocks and reaches back only ~2 months, but it agreed with
+# blxrbdn on every window ever tested, which is exactly what a cross-check needs.
+XCHECK_EPS = {"bsc": ["https://bsc.rpc.blxrbdn.com", "https://bsc.blockrazor.xyz"]}
+
 # Largest eth_getLogs window each pool will actually serve. Exceeding it does not
 # degrade gracefully; it times out or truncates.
-MAX_SPAN = {"bsc": 2000, "base": 2000, "eth": 2000}
+# bsc 20,000 and not nodereal's 50,000 block ceiling: on dense history a 50,000-block
+# window trips the 50,000-RESULT cap instead, and each trip costs a bisection. 20,000
+# stayed under both caps across a 3,058-window replay.
+MAX_SPAN = {"bsc": 20000, "base": 2000, "eth": 2000}
 
 # Endpoints that answer eth_blockNumber happily and can never serve logs. Matching these
 # evicts the endpoint from rotation instead of burning every retry on it — and, more
@@ -75,9 +98,16 @@ class RangeError(Exception):
 # dataseeds use it for throttling — so it is deliberately NOT a range signal.
 RANGE_SIGNS = ("block range", "range is too", "exceed maximum block", "more than",
                "response size", "too large", "result set", "query returned more",
-               "logs matched", "query timeout", "range too")
+               "logs matched", "query timeout", "range too",
+               # nodereal: "logs count exceeds the limit 50000" — a RESULT cap, not a
+               # block-range cap, and it matched nothing in this tuple before. Note it is
+               # "exceeds the limit", NOT nodereal's throttle text "limit exceeded" below.
+               "exceeds the limit", "count exceeds")
 RATE_SIGNS = ("rate limit", "too many request", "429", "capacity", "throttl",
-              "quota", "limit exceeded", "over rate")
+              "quota", "limit exceeded", "over rate",
+              # nodereal throttles with "You have reached the maximum API usage limit of
+              # public key ..." — contains the word "limit" but is a BACKOFF, not a split.
+              "usage limit", "reached the maximum api")
 
 
 class Client:
@@ -100,6 +130,14 @@ class Client:
                                               "params": params}, timeout=self.timeout)
                 # A 429/503 carrying a JSON body parses fine and looks like a real reply,
                 # so the run ends blaming the data instead of the rate limit.
+                # An HTTP-level 429 is a rate limit too, and the generic exception path
+                # backs off in fractions of a second — far too fast when the pool is a
+                # single endpoint and there is nothing to rotate to. Sleep like a rate
+                # signal, because that is exactly what it is.
+                if resp.status_code in (429, 503):
+                    last = f"{url}: HTTP {resp.status_code}"
+                    time.sleep(2.0 * (i + 1))
+                    continue
                 resp.raise_for_status()
                 j = resp.json()
                 if "error" in j:

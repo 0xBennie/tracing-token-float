@@ -42,6 +42,13 @@ DANGEROUS = {
     "0x8980f11f": ("recoverERC20(address,uint256)", "escape"),
     "0xbc25cf77": ("skim(address)", "escape"),
     "0x95ccea67": ("emergencyWithdraw(address,uint256)", "escape"),
+    # The 3-arg form is what an upgradeable deposit vault actually ships (token, amount,
+    # recipient). Found live on a BSC protocol vault holding 13.7% of a token's supply
+    # while the 2-arg selector above matched nothing — one missing overload read as clean.
+    "0x551512de": ("emergencyWithdraw(address,uint256,address)", "escape"),
+    # Not a withdrawal, but on a deposit vault it is the same class of hole: the router
+    # is where deposits are forwarded, so an owner-only setter redirects the flow.
+    "0xc0d78655": ("setRouter(address)", "escape"),
     "0xdb2e21bc": ("emergencyWithdraw()", "escape"),
     "0x5312ea8e": ("emergencyWithdraw(uint256)", "escape"),
     "0x51cff8d9": ("withdraw(address)", "escape"),
@@ -58,6 +65,11 @@ DANGEROUS = {
     "0x0aaffd2a": ("updateBeneficiary(address)", "vesting"),
     "0x1c31f710": ("setBeneficiary(address)", "vesting"),
     "0x20c5429b": ("revoke(uint256)", "vesting"),
+    # TGE is the anchor every cliff and every slice is measured from, so an owner-only
+    # setter for it accelerates the WHOLE remaining schedule in one call — a bigger hole
+    # than revoking any single schedule, and it is not in any standard vesting interface.
+    "0xad70bc7c": ("updateTge(uint256)", "vesting"),
+    "0x3c7a4af7": ("createVestingSchedule(uint256,address,uint256,uint256,uint256,uint256,uint256,uint256)", "vesting"),
 }
 
 
