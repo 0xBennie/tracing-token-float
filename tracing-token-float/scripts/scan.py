@@ -8,9 +8,9 @@
     3. What is the paper position worth against that?          (the ratio)
 
 Deliberately does NOT compute "the team controls X% of float". That number is
-expensive to produce, mostly restates the published allocation table, and is the
-same decision at across the plausible range. If you need it, that is what the full method in
-SKILL.md is for — but run this first, because a live mint or sweep path makes the
+expensive to produce, mostly restates the published allocation table, and rarely
+changes the decision across the plausible range. If you need it, that is what the
+full method in SKILL.md is for — but run this first, because a live mint or sweep path makes the
 percentage moot, and thin exit liquidity makes it academic.
 
 Every number this prints is a floor, and it says so: pools it could not read are
@@ -53,9 +53,10 @@ STABLES = {
 
 
 def block_time(c, span=5_000):
-    """Measured seconds per block. Never assume it: BSC is 0.75s and Base is 2s, so a
-    fixed block `lookback` covers 2.7x more history on one than the other and the same
-    default silently means different things per chain."""
+    """Measured seconds per block. Never assume it, and never carry a value over from a
+    previous run: chains change it at upgrades, and published constants go stale. A fixed
+    block `lookback` therefore covers a different span of history on every chain, so the
+    same default silently means different things. Measure, then convert."""
     head = c.block_number()
     lo = max(0, head - span)
     t1 = int(c.call("eth_getBlockByNumber", [hex(head), False])["timestamp"], 16)

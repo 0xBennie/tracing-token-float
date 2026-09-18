@@ -135,7 +135,7 @@ Never merge these. Report them separately and let the reader choose their own ha
 - **M — Market makers.** A MM's inventory may be the issuer's, borrowed from it, or its own. Give it its own bucket — but **M is a starting bucket, not a verdict**. Try to empty it before you publish it.
 
   A one-hop test between issuer and desk returning zero does not mean independence; it means you have not looked at hop two. Shell chains are built precisely to make hop one clean. What resolves M on-chain:
-  - **A test transfer before the real one.** `10.00` then `~1.4 million` from the same sender, minutes apart, at every hop. Nobody sanity-checks an address they do not control the other end of.
+  - **A test transfer before the real one.** `10.00` then ~1.4 million from the same sender, minutes apart, at every hop. Nobody sanity-checks an address they do not control the other end of.
   - **Arrival before the pool exists.** Inventory in place N blocks *before* the pool is created is not a desk that bought in; it was positioned.
   - **Return flow to the issuer's treasury.** An independent desk does not send inventory back to the issuer's multisig. This is the single strongest signal, and it is a direction question, not a net-flow question.
 

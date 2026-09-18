@@ -38,7 +38,7 @@ which is around seven minutes for that pool alone. It prints progress as it goes
   0xa1b2c3…   quote MEME  [NOT priced — excluded from $ totals]
   0xd4e5f6…   quote USDC
              sell      fillable       proceeds          avg         after    drop
-           10,000        10,000       4,120.00     0.412000    0.41142000   -0.9%
+           10,000        10,000       4,120.00     0.412000    0.41142000   -0.8%
           100,000       100,000      19,400.00     0.194000 3.1000000e-07 -100.0%
 
 [3] VERDICT
@@ -48,7 +48,7 @@ which is around seven minutes for that pool alone. It prints progress as it goes
      -> the totals below are a FLOOR, not the market
 
   displayed liquidity (TVL style)   $1,480,000
-  actually reachable by selling     $25,293   (76.3x overstated)
+  actually reachable by selling     $19,400   (76.3x overstated)
   position at mark price            $41,200,000
   paper : reachable                 2,124 : 1
 ```
@@ -56,8 +56,8 @@ which is around seven minutes for that pool alone. It prints progress as it goes
 Run this before the full method below — either answer can make the rest academic.
 
 **It deliberately does not compute "the team controls X% of float."** That number is
-expensive, mostly restates the published allocation table, and is the same decision at
-across the plausible range. The layers below are there when you need it anyway.
+expensive, mostly restates the published allocation table, and rarely changes the
+decision across the plausible range. The layers below are there when you need it anyway.
 
 ## The layers
 
@@ -82,7 +82,7 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             24 traps that corrupt results while every number still looks fine
+    pitfalls.md             27 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
     scan.py                 the three-number pass — start here
@@ -106,24 +106,15 @@ git clone https://github.com/0xBennie/tracing-token-float.git
 cp -r tracing-token-float/tracing-token-float ~/.claude/skills/
 ```
 
-> The repository is currently **private**, so that clone only works for accounts with
-> access.
-
-### On the case study
-
-`case-study/` — the audit this skill was distilled from — is **not in this repository**,
-and never was as far as its history is concerned. It names a real project, quotes its
-contract addresses, and documents a live `sweep()` path on its bridge adapter; none of
-that belongs in a general-purpose tool.
-
-It was removed from every commit with `git filter-repo --path case-study --invert-paths`
-on 2026-09-06 and both branches force-pushed. A mirror clone confirms zero commits, zero
-trees and zero blobs referencing it. The directory stays on the author's disk and is
-listed in `.gitignore`, so it cannot drift back in.
-
-Nothing further is required before making this repository public.
-
 Codex, Copilot CLI and Gemini CLI also read `~/.agents/skills/`.
+
+### On the examples
+
+Every figure and sample output in this repository is synthetic or rounded. The method was
+developed against a real audit, but that audit — the project's name, its contract
+addresses, and the privileged paths found on them — is not published here and is absent
+from this repository's history. Where a case is described, it is described in shape:
+the ratios and the mechanism are real, the exact amounts are not.
 
 ## Using the tools standalone
 

@@ -207,7 +207,7 @@ The single worst substitution in this whole file, because the number looks like 
 
 `vol_in − vol_out` and the buy-count/sell-count ratio both discard time, and a one-shot
 snipe followed by distribution is indistinguishable from patient accumulation once you do.
-A real case: six wallets showed `+roughly 4.7 million` net and a 160-buy / ~17,000-sell split. Read
+A real case: six wallets showed roughly +4.7 million net and a ~160-buy / ~17,000-sell split. Read
 as aggregates that says "accumulating, and market-making". The sequence says otherwise —
 **over 99% of all buying happened in the single block that seeded the pool** (nine addresses
 took 87.3% of the initial liquidity, log indices in an arithmetic run with nothing
