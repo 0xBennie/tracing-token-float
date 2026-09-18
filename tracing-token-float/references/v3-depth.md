@@ -25,6 +25,21 @@ price(token1 per token0) = (sqrtPriceX96 / 2**96)**2 * 10**(dec0 - dec1)
 sqrtP(tick) = 1.0001 ** (tick / 2)
 ```
 
+## Scan the full range, and budget for it
+
+Word count is `2 × 887272 / tickSpacing / 256`, so the cost is bounded but very uneven:
+
+| tickSpacing | bitmap words | measured |
+|---|---|---|
+| 200 (Aerodrome 0.3%) | ~35 | 59 s |
+| 60 | ~115 | — |
+| 1 (Pancake 0.01%) | ~6,932 | **428 s** |
+
+Seven minutes on a `tickSpacing=1` pool is normal, not a hang. Take it: a windowed scan
+cannot satisfy `sum(liquidityNet) == 0`, and without that identity a truncated book is
+indistinguishable from a real one — it reconstructs plausible reserves and then reports
+the bottom of the scanned range as a price floor.
+
 ## Building the profile
 
 1. `comp = tick // tickSpacing`; `wordPos = comp >> 8`. Python's floor division and arithmetic shift already behave correctly for negative ticks — don't "fix" them.
@@ -40,7 +55,9 @@ Before any number leaves this stage, integrate the profile back into reserves an
 - Upward, accumulating `L * (1/sqrtP_lo - 1/sqrtP_hi)` → token0
 - Crossing a tick downward: `L -= liquidityNet`. Upward: `L += liquidityNet`.
 
-Reconstructed reserves should land within ~10% of the on-chain balances. The shortfall is uncollected and protocol fees, which sit in the balance but never participate in swaps. Orders-of-magnitude divergence means a decode bug; a large but finite gap means the scan window was too narrow.
+Reconstructed reserves should sit at or just below the on-chain balances — never above. The shortfall is uncollected and protocol fees, which sit in the balance but never participate in swaps. Orders-of-magnitude divergence means a decode bug; a large finite gap means the scan window was too narrow.
+
+**Also assert the two structural identities**, which catch truncation the reserve comparison does not: over the full tick range `sum(liquidityNet) == 0`, and `sum(liquidityNet for t <= currentTick) == liquidity()`. A truncated scan still reconstructs plausible-looking reserves and then reports the bottom of the scanned range as a price floor — that is exactly how a depth file full of fake floors got produced.
 
 **Do not report depth numbers from a profile that hasn't passed this check.**
 
@@ -66,6 +83,28 @@ Two stopping conditions matter as much as the loop:
 - **Liquidity exhausted.** Below the lowest initialized tick there are no bids at all. Report the fillable quantity, not the requested one.
 
 Floating point is adequate here — `L` around 10^20–10^23 stays well inside float64 precision, and the answer is a risk estimate, not a settlement figure.
+
+### Selling token1 — the other half, and you will need it
+
+Whether the token you are auditing is `token0` or `token1` is decided by address ordering, not by importance. Roughly half of all pools put it second, and a simulator that only walks downward silently reports **zero depth** for those — which reads as "no exit liquidity" when the truth may be the opposite. `depth.py` exposes both (`sell` / `sell1`, and `curve(sizes, token1=True)`); check `token0()` against your token before quoting a number.
+
+Selling token1 moves price **up**, so the loop mirrors:
+
+```
+dy_max  = L * (sqrtP_next - sqrtP)             # token1 the segment absorbs
+if remaining * (1-f) < dy_max:                 # fills inside the segment
+    sqrtP_end = sqrtP + remaining*(1-f)/L
+    out += L * (1/sqrtP - 1/sqrtP_end)         # output is token0
+    done
+else:
+    out += L * (1/sqrtP - 1/sqrtP_next)
+    remaining -= dy_max / (1-f)
+    cross: sqrtP = sqrtP_next; L += liquidityNet[tick_next]
+```
+
+Note the two sign flips that are easy to miss: the tick crossing **adds** `liquidityNet` going up (it subtracts going down), and the output accumulator uses the reciprocal form. Getting one right and the other wrong produces a curve that looks plausible and is wrong by the width of the range.
+
+The stopping conditions swap accordingly: cumulative output cannot exceed the pool's **token0** balance, and above the highest initialized tick there are no asks left.
 
 ## Reporting
 
