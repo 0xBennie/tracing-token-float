@@ -127,7 +127,10 @@ def _raw_call(c, addr, data, caller):
         if e.get("code") in (-32001, -32005, 429):        # rate limited, try next node
             continue
         return dict(ok=False, data=(e.get("data") or "")[:10], msg=str(e.get("message", "")))
-    return dict(ok=False, data=None, msg="all endpoints failed")
+    # NOT the same shape as a refusal by the contract. ok=False with data=None means
+    # nobody answered, and a caller comparing revert payloads must not read that as
+    # "the gate rejected this caller".
+    return dict(ok=False, data=None, msg="all endpoints failed", unanswered=True)
 
 
 def _is_auth_refusal(r):
@@ -235,20 +238,32 @@ def audit(c, addr, check_callable=True):
     impl, admin = _slot(c, addr, SLOT_IMPL), _slot(c, addr, SLOT_ADMIN)
     # A proxy's own bytecode is a 45-byte delegate stub with no dispatch table — scanning
     # it finds nothing. The functions that matter live in the implementation.
+    impl_unread = None
     if impl:
         try:
             icode = c.call("eth_getCode", [impl, "latest"])
             if icode not in ("0x", "0x0"):
                 sels |= selectors(icode)
-        except Exception:
-            pass
-    owner = None
+        except Exception as e:
+            # A proxy keeps its ENTIRE privilege surface in the implementation. Swallowing
+            # this refusal reports "no dangerous selectors" for a contract whose selectors
+            # were never read — the escape hatch reads as absent because the node was busy.
+            # One audit's deposit vault was a 130-byte proxy whose full-balance
+            # emergencyWithdraw lived only in its implementation.
+            impl_unread = str(e)[:90]
+    owner, owner_unread = None, None
     try:
         owner = "0x" + c.eth_call(addr, "0x8da5cb5b")[-40:]
         if int(owner, 16) == 0:
             owner = None
-    except Exception:
-        pass
+    except Exception as e:
+        # "this contract has no owner()" and "the node would not answer" are different
+        # facts, and only the first is data. Conflating them skips the liveness probe
+        # below in silence, so every privileged path ends up unproven and unflagged.
+        msg = str(e).lower()
+        if any(k in msg for k in ("rate", "429", "timeout", "throttle", "quota",
+                                  "too many", "refused", "503")):
+            owner_unread = str(e)[:90]
     if check_callable and owner:
         for f in found:
             if f["kind"] in ("escape", "supply", "vesting"):
@@ -261,12 +276,23 @@ def audit(c, addr, check_callable=True):
     return dict(address=addr, is_contract=True, codesize=(len(code) - 2) // 2,
                 is_proxy=bool(impl or admin), implementation=impl, proxy_admin=admin,
                 owner=owner, privileged=found,
-                verdict=_verdict(found, impl, admin))
+                impl_unread=impl_unread, owner_unread=owner_unread,
+                verdict=_verdict(found, impl, admin, impl_unread, owner_unread))
 
 
-def _verdict(found, impl, admin):
+def _verdict(found, impl, admin, impl_unread=None, owner_unread=None):
     kinds = {f["kind"] for f in found}
     bad = []
+    # These come FIRST. A clean-looking privilege list over an unread implementation is
+    # the most dangerous output this tool can produce, so it may never be printed
+    # without the reason it is incomplete.
+    if impl_unread:
+        bad.append(f"IMPLEMENTATION NOT READ ({impl_unread}) — this is a proxy and its "
+                   f"selectors are where the escape hatch lives. Everything below "
+                   f"describes the PROXY ONLY and is not an audit. Re-run.")
+    if owner_unread:
+        bad.append(f"owner() NOT READ ({owner_unread}) — no liveness probe ran, so every "
+                   f"privileged path below is unproven rather than absent")
     if impl or admin:
         bad.append("upgradeable — today's bytecode is not a commitment")
     if "supply" in kinds:

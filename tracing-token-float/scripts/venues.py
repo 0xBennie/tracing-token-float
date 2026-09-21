@@ -110,6 +110,7 @@ def mine_counterparties(gcli, cli, token, head, chain, window=200_000, cap=120):
     """Addresses the token moves against, probed for pool interfaces."""
     span = MAX_SPAN.get(chain, 2000)
     seen, cur, asked, answered, refused = collections.Counter(), head, 0, 0, 0
+    nwin = max(1, window // span)
     while cur > head - window:
         lo = max(1, cur - span + 1)
         asked += 1
@@ -128,8 +129,11 @@ def mine_counterparties(gcli, cli, token, head, chain, window=200_000, cap=120):
             continue
         except Exception:
             refused += 1
+        print(f"     window {asked}/{nwin}  {len(seen):,} counterparties seen"
+              f"  ({refused} refused)")
         cur = lo - 1
     found = []
+    print(f"     probing the {min(cap, len(seen)):,} most frequent for a pool interface…")
     for a, _ in seen.most_common(cap):
         try:
             t0 = _addr(cli.eth_call(a, SEL["token0"]))
@@ -144,6 +148,7 @@ def mine_counterparties(gcli, cli, token, head, chain, window=200_000, cap=120):
         except Exception:
             pass
         found.append((a.lower(), kind, t0.lower(), t1.lower()))
+        print(f"       pool-like: {a}  ({kind})")
     return found, asked, answered, refused
 
 
@@ -155,12 +160,23 @@ def main():
                    help="extra quote asset; repeatable. Stables + wrapped native are swept anyway")
     p.add_argument("--factory", action="append", default=[],
                    help="extra factory as 0xADDR:v2|v3; repeatable")
+    p.add_argument("--quote-price", action="append", default=[],
+                   help="price a non-stable quote, e.g. WBNB=900. Quotes with no price "
+                        "are EXCLUDED from the share basis and listed separately — never "
+                        "summed at face value")
     p.add_argument("--min-share", type=float, default=99.0,
                    help="exit 2 if the largest pool holds less than this %% of discovered quote")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
 
     cli, gcli = Client(NETS[a.chain]), Client(LOG_EPS[a.chain])
+    prices = {}
+    for kv in a.quote_price:
+        k, _, v = kv.partition("=")
+        try:
+            prices[k.strip().upper()] = float(v)
+        except ValueError:
+            sys.exit(f"--quote-price {kv!r} is not SYM=<number>")
     token = a.token.lower()
     head = cli.block_number()
     stables = STABLES.get(a.chain, {})
@@ -173,6 +189,12 @@ def main():
         facs.append((addr.lower(), kind or "v3"))
 
     print(f"  token {token}   chain {a.chain}   head #{head:,}")
+    if not SEED_FACTORIES.get(a.chain):
+        print(f"  !! no seed factory is known for {a.chain}. Counterparty mining alone "
+              f"CANNOT see a pool with no recent trades, which is the whole reason the "
+              f"factory sweep exists — a dormant pool holding real quote stays invisible. "
+              f"Pass --factory 0xADDR:v2|v3 (it is round-trip verified) before treating "
+              f"the coverage figure below as coverage.")
     print(f"  sweeping {len(quotes)} quote asset(s) x {len(FEE_TIERS)} fee tier(s)\n")
 
     pools = {}
@@ -233,21 +255,47 @@ def main():
             tb = int(cli.eth_call(token, BALANCE_OF + pa[2:].rjust(64, "0")), 16) / 10 ** td
         except Exception:
             continue
-        rows.append({"pool": pa, "quote": quote, "qsym": stables.get(quote) or sym(cli, quote),
-                     "quote_balance": qb, "token_balance": tb,
+        qsym = stables.get(quote) or sym(cli, quote)
+        # A quote asset is worth its face value only if we KNOW what it is worth.
+        # Summing 69 million of a microcap next to 370 thousand USDT ranked a pool with
+        # no exit value at 99.5% of "all discovered quote" — that microcap's own deepest
+        # market was under a dollar. Price it, or leave it out of the basis and say so.
+        rate = 1.0 if quote in stables else prices.get(qsym.upper())
+        rows.append({"pool": pa, "quote": quote, "qsym": qsym,
+                     "quote_balance": qb, "quote_usd": (qb * rate) if rate else None,
+                     "priced": rate is not None,
+                     "token_balance": tb,
                      "fee": meta.get("fee"), "kind": meta["kind"], "how": meta["how"]})
 
-    tot_q = sum(r["quote_balance"] for r in rows) or 1.0
-    rows.sort(key=lambda r: -r["quote_balance"])
-    print(f"  {'pool':44} {'kind':5} {'fee':>6} {'quote':>7} {'quote bal':>16} {'share':>8} {'token bal':>16} how")
+    priced = [r for r in rows if r["priced"]]
+    unpriced = [r for r in rows if not r["priced"]]
+    tot_q = sum(r["quote_usd"] for r in priced) or 1.0
+    rows.sort(key=lambda r: -(r["quote_usd"] if r["priced"] else -1))
+    print(f"  {'pool':44} {'kind':5} {'fee':>6} {'quote':>8} {'quote bal':>17} {'$ value':>14} {'share':>8} {'token bal':>15} how")
     for r in rows:
-        r["share_pct"] = r["quote_balance"] / tot_q * 100
-        print(f"  {r['pool']:44} {r['kind']:5} {str(r['fee'] or '-'):>6} {r['qsym']:>7} "
-              f"{r['quote_balance']:>16,.2f} {r['share_pct']:>7.3f}% {r['token_balance']:>16,.2f} {r['how']}")
+        r["share_pct"] = (r["quote_usd"] / tot_q * 100) if r["priced"] else None
+        usd = f"{r['quote_usd']:>14,.2f}" if r["priced"] else f"{'NOT PRICED':>14}"
+        sh = f"{r['share_pct']:>7.3f}%" if r["priced"] else f"{'—':>8}"
+        print(f"  {r['pool']:44} {r['kind']:5} {str(r['fee'] or '-'):>6} {r['qsym']:>8} "
+              f"{r['quote_balance']:>17,.2f} {usd} {sh} {r['token_balance']:>15,.2f} {r['how']}")
 
-    top = rows[0]["share_pct"] if rows else 0.0
-    print(f"\n  VENUE COVERAGE: {len(rows)} pool(s) hold quote; the largest is "
-          f"{top:.3f}% of all discovered quote.")
+    top = priced[0]["share_pct"] if priced else 0.0
+    if priced:
+        priced.sort(key=lambda r: -r["quote_usd"])
+        top = priced[0]["share_pct"]
+    print(f"\n  VENUE COVERAGE: {len(priced)} priced pool(s) hold ${tot_q:,.2f} of quote; "
+          f"the largest is {top:.3f}% of it.")
+    if unpriced:
+        print(f"  !! {len(unpriced)} pool(s) are quoted in an asset with no price and are "
+              f"NOT in that basis:")
+        for r in unpriced:
+            print(f"       {r['pool']}  {r['quote_balance']:,.2f} {r['qsym']} "
+                  f"+ {r['token_balance']:,.2f} token")
+        print(f"     Face value is not value: one such pool held 69 million units of a "
+              f"microcap whose own deepest market was under a dollar, and ranking by "
+              f"face value put it first at 99.5%. Price them with --quote-price "
+              f"SYM=<usd>, or treat their depth as unknown — never as zero and never "
+              f"as their balance.")
     print(f"  Quote this beside every market figure. 'The market' means these "
           f"{len(rows)} venues and nothing else — CEX inventory is invisible here, and "
           f"so is any chain you did not scan.")
@@ -257,9 +305,11 @@ def main():
 
     if a.json:
         print("\n" + json.dumps({"token": token, "head": head, "pools": rows,
-                                 "total_quote": tot_q, "top_share_pct": top,
+                                 "priced_quote_usd": tot_q, "top_share_pct": top,
+                                 "unpriced_pools": len(unpriced),
                                  "mining_refused": ref}, indent=1, default=str))
-    sys.exit(0 if top >= a.min_share and not ref else 2)
+    # Unpriced pools are an unknown, and an unknown is not a pass.
+    sys.exit(0 if (top >= a.min_share and not ref and not unpriced) else 2)
 
 
 if __name__ == "__main__":

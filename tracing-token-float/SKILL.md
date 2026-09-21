@@ -137,8 +137,8 @@ Work bottom-up. Each layer is worthless if the one below it didn't pass its gate
 | **L1 Distribution** | The genesis tree: deployer EOA → first large transfers → each allocation bucket | Every on-chain bucket reconciles against the published allocation table; discrepancies named |
 | **L1.5 Pool birth** | Who took the initial liquidity, in the block that seeded it | The block that created each pool is read transaction by transaction |
 | **L2 Attribution** | Each material address tagged with an ownership tier (below) | Tiers sum exactly to the float |
-| **L3 Clustering** | Address clusters under one controller | Infrastructure addresses excluded (see pitfalls) or clusters collapse |
-| **L4 Sybil** | Batch-controlled airdrop claimers | Collision rate compared against a stated null hypothesis |
+| **L3 Clustering** *(no tool — by hand)* | Address clusters under one controller | Infrastructure addresses excluded (see pitfall #7) or clusters collapse. **Nothing in `scripts/` does this**: build it per case from the DB, and before calling a large cluster issuer-adjacent, rule out exchange custody first — senders and receivers nearly disjoint, over half the depositors appearing once, a hot wallet feeding one cold wallet, and tens of millions in stablecoins alongside. One audit's two biggest "issuer-suspect" blocks, a quarter of the float, fit that shape exactly |
+| **L4 Sybil** *(no tool — by hand)* | Batch-controlled airdrop claimers | Collision rate compared against a stated null hypothesis (pitfall #8). **Nothing in `scripts/` does this either.** Skipping the layer is allowed; saying nothing about having skipped it is not — name the unattributed share and that no clustering was run |
 | **L5 Control** | Who holds the keys; what the locks are actually worth | Effective lock period computed, not assumed |
 | **L6 Cross-chain** | Bridge mode determined, then per-chain supply reconciled | Lock-and-mint: adapter escrow == remote `totalSupply`. Native burn/mint: per-chain supplies sum to the global total. Residual named per message |
 | **L7a Venues** | Every place the token trades, enumerated — not the one pool you found first | The enumeration *method* is stated (factory `getPool` across every fee tier × every quote, V2 `getPair`, plus Transfer-counterparty mining) and the measured pools' share of discovered quote is printed. A depth number from an unenumerated market is a number about one pool wearing the word "market" |
@@ -234,7 +234,10 @@ summed across every venue L7a enumerated** — and say how many venues that was.
 - Snapshot at a stated block and time — and read any single pool's state within one consistent block (see pitfalls #12)
 - Number every claim (`A1`, `J4`, …) so reviewers can accept or reject them one at a time
 - Recompute each headline figure by a second path before it ships
-- For anything consequential, run independent reviewers per layer, then have separate agents **try to refute** the disputed findings rather than confirm them
+- For anything consequential, run independent reviewers per layer, then have separate agents **try to refute** the disputed findings rather than confirm them. Three rules that decide whether that is worth anything:
+  - **Give each reviewer its own working directory.** Parallel reviewers sharing one scratchpad overwrite each other's helper code — in one round a reviewer's RPC module was replaced mid-run by another agent's file with a different signature, and it only noticed because it re-read its own tool. Independence you did not isolate is not independence.
+  - **Audit the briefing itself, with a dedicated reviewer.** Every constant you hand out is inherited by everyone, and the adversarial pass cannot by definition attack a premise all of them share. One briefing shipped a price derived from the tick rather than `sqrtPriceX96`, a four-byte address prefix nobody could verify, and an event count produced by a broken query — all three propagated untouched until a reviewer was pointed at the briefing rather than at the chain.
+  - **Correct the briefing mid-flight when you find it wrong**, and say which number changed. A reviewer working from a superseded premise produces a confident answer to the wrong question.
 - Track retractions in the deliverable. An analysis that shows what it got wrong is more credible, not less
 
 **REQUIRED READING before you compute anything:** [references/pitfalls.md](references/pitfalls.md) — the traps that silently corrupt results while every number still looks plausible. Several will hit you.

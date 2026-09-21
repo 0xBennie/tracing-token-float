@@ -111,6 +111,23 @@ RATE_SIGNS = ("rate limit", "too many request", "429", "capacity", "throttl",
 
 
 
+# An execution revert is the CHAIN answering. It is not a refusal, it will say the same
+# thing on every endpoint, and rotating through them to collect the same revert wastes
+# the rate limit that the next real question needs. Pitfall #26 draws this line and the
+# first version of this census ignored it: a contract with no owner() reported "1 request
+# never answered", which is both wrong and the exact confusion the census exists to stop.
+REVERT_SIGNS = ("execution reverted", "revert", "invalid opcode", "out of gas",
+                "stack underflow", "invalid jump")
+
+
+class RevertError(RuntimeError):
+    """The chain answered, and the answer was a revert. Data, not a refusal."""
+
+    def __init__(self, msg, data=None):
+        super().__init__(msg)
+        self.data = data
+
+
 class Census:
     """asked / answered / refused, for the whole process, printed whether you remember
     to or not.
@@ -132,15 +149,20 @@ class Census:
         self.answered = collections.Counter()
         self.refused = collections.Counter()
         self.empty = collections.Counter()
+        self.reverted = collections.Counter()
 
     def totals(self):
         return (sum(self.asked.values()), sum(self.answered.values()),
                 sum(self.refused.values()), sum(self.empty.values()))
 
+    def reverts(self):
+        return sum(self.reverted.values())
+
     def line(self):
         a, k, r, e = self.totals()
         return (f"RPC CENSUS  asked {a:,}  answered {k:,}  refused {r:,} "
-                f"({(r / a * 100 if a else 0):.1f}%)  empty-but-answered {e:,}")
+                f"({(r / a * 100 if a else 0):.1f}%)  empty-but-answered {e:,}  "
+                f"reverted-by-chain {self.reverts():,}")
 
 
 CENSUS = Census()
@@ -155,6 +177,9 @@ def _print_census():
         print(f"    {m:<26} asked {CENSUS.asked[m]:>7,}  answered {CENSUS.answered[m]:>7,}"
               f"  refused {CENSUS.refused[m]:>7,}  empty {CENSUS.empty[m]:>7,}",
               file=sys.stderr)
+    if CENSUS.reverts():
+        print(f"    ({CENSUS.reverts():,} call(s) reverted — that is the CHAIN answering, "
+              f"counted as answered, not as a refusal.)", file=sys.stderr)
     if r:
         print(f"    !! {r:,} request(s) were never answered. Every 'none found', 'no "
               f"events', 'no pool', 'no position manager' above is a FLOOR, not a fact "
@@ -223,6 +248,15 @@ class Client:
                         continue
                     if any(k in msg for k in RATE_SIGNS):
                         time.sleep(1.5 * (i + 1))     # back off, do NOT split the window
+                        continue
+                    if any(k in msg for k in REVERT_SIGNS):
+                        # The chain answered. Every other endpoint will answer the same,
+                        # so stop here instead of burning the rotation on it.
+                        CENSUS.answered[method] += 1
+                        CENSUS.reverted[method] += 1
+                        raise RevertError(f"{method} reverted :: {j['error']}",
+                                          data=(j["error"].get("data")
+                                                if isinstance(j["error"], dict) else None))
                     continue
                 if "result" not in j:
                     last = f"{url}: reply had neither result nor error"
@@ -231,8 +265,8 @@ class Client:
                     last = f"{url}: result=null"      # never hand None to a caller
                     continue
                 return self._answered(method, j["result"])
-            except RangeError:
-                raise
+            except (RangeError, RevertError):
+                raise                 # a revert is the chain's answer; do not retry it
             except Exception as e:
                 last = f"{url}: {e}"
             time.sleep(0.35 * (i + 1))

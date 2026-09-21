@@ -26,6 +26,7 @@ Six of the 27 selectors this skill shipped with were wrong from being recalled.
 """
 import argparse, json, sys
 from itertools import combinations
+from topics import topic0
 from rpc import Client, BASE, BSC, ETH
 from privileges import audit, safe_control
 
@@ -57,10 +58,13 @@ SEL = dict(
 )
 # keccak256 of the role name, which is how OpenZeppelin's TimelockController defines them.
 ROLES = {
-    "PROPOSER":  "0xb09aa5aeb3702cfd50b6b62bc4532604938f21248a27a1d5ca736082b6819cc1",
-    "EXECUTOR":  "0xd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63",
-    "CANCELLER": "0xfd643c72710c63c0180259aba6b2d05451e3591a24e58b62239378085726f783",
-    "ADMIN":     "0x5f58e3a2316349923ce3780f8d587db2d72378aed66a8261c916544fa6846ca5",
+    # Derived, not typed. These decide whether a timelock can be bypassed, so a wrong
+    # one reads as "nobody holds PROPOSER_ROLE" — i.e. as a real lock. The four below
+    # were verified correct when this changed, but nothing would have caught a drift.
+    "PROPOSER":  topic0("PROPOSER_ROLE"),
+    "EXECUTOR":  topic0("EXECUTOR_ROLE"),
+    "CANCELLER": topic0("CANCELLER_ROLE"),
+    "ADMIN":     topic0("TIMELOCK_ADMIN_ROLE"),
 }
 
 

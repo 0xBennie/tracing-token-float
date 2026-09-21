@@ -26,6 +26,7 @@ import argparse, json, sys
 from collections import defaultdict
 from rpc import Client, BASE, BSC, ETH, LOG_EPS, MAX_SPAN, RangeError, s256
 from scan import STABLES
+from topics import T as _T
 from depth import Pool, InconsistentState, MIN_TICK, MAX_TICK
 
 try:
@@ -38,9 +39,9 @@ NETS = {"base": BASE, "bsc": BSC, "eth": ETH}
 # keccak-measured, never recalled. Recomputing these costs one line; six of the 27
 # selectors this skill shipped with were wrong because someone typed them from memory.
 #   Mint(address,address,int24,int24,uint128,uint256,uint256)
-MINT = "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
+MINT = _T["v3.Mint"]
 #   IncreaseLiquidity(uint256,uint128,uint256,uint256)
-INCREASE = "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f"
+INCREASE = _T["nfpm.IncreaseLiquidity"]
 POSITIONS = "0x99fbab88"      # positions(uint256)
 OWNER_OF = "0x6352211e"       # ownerOf(uint256)
 BALANCE_OF = "0x70a08231"     # balanceOf(address)
