@@ -61,6 +61,98 @@ Reconstructed reserves should sit at or just below the on-chain balances — nev
 
 **Do not report depth numbers from a profile that hasn't passed this check.**
 
+## Before the profile means anything: is the book still the book you measured?
+
+A tick profile is a photograph. Whether it describes the next fortnight or the next
+block is a separate measurement, and it decides whether a depth figure may be written
+in the past tense.
+
+Census the window you intend to describe, **with no topic filter**, bucketed by
+`topic0` (`scripts/topics.py` does this and names what it recognises):
+
+```python
+logs = cli.call("eth_getLogs", [{"address": pool,
+                                 "fromBlock": hex(lo), "toBlock": hex(hi)}])
+counts = collections.Counter(l["topics"][0] for l in logs)
+```
+
+Filtering by a topic you typed is how a renamed or mistyped event becomes "no events".
+Then read it:
+
+- **`Mint == 0` while `Burn > 0` is a broken query, not a quiet pool.** Liquidity that
+  was never minted cannot be burned. One run published "no Mint/Burn in a million blocks";
+  a re-query of 13 days found **several hundred Mints and the same number of Burns**. The Mint topic had been
+  typed from memory and `eth_getLogs` returned `[]` without error. Nothing in the
+  profile could have told you.
+- **`Burn` moves no tokens.** It credits `tokensOwed`; `Collect` performs the transfer.
+  A window with Burns and no Collects has liquidity out of the book but still in the
+  ERC-20 balance — exactly the residual the reserve self-check is tolerating.
+- **Same-block Mint/Burn pairs are JIT even when they are two transactions.** 351 of
+  those pairs shared a block, median survival 0 blocks. Pitfall #5 applies: that
+  liquidity will not absorb a dump, and it must not be counted as depth.
+- To know whether a snapshot is representative, sample `liquidity()` across the window
+  rather than arguing about it. In the case above 400 equidistant samples showed a
+  **binary step** (2.00% of issuer L above one tick, 0.04% below) and never once landed
+  on JIT — so the snapshot was sound. That is a measurement, not an assumption.
+
+## The flow inside that window is `Swap` only
+
+```
+d(balance token0) == sum swap.amount0 + sum mint.amount0
+                     - sum collect.amount0 - sum collectProtocol.amount0
+```
+
+`amount0`/`amount1` on `Swap` are signed from the pool's side: positive is into the pool
+(someone sold it), negative is out. Compute both directions and their counts; never
+publish the net alone. `Burn` is absent from the identity on purpose. Run it as a gate —
+it is the only thing that tells you a log query came back short. On over 100,000 swaps it
+closed to a hundredth of a token, and that residual resolved to a few dozen transactions where the payer
+dusted the pool inside the swap callback.
+
+## The three numbers, and how to compute each
+
+`sell()` answers one question. Which one depends on what book you hand it.
+
+**1. Spot exit — what a third party gets now.** `sell()` on the profile exactly as
+scanned. No subtraction, no attribution. The AMM pays from whatever is at the tick.
+
+**2. Post-withdrawal exit — the counterfactual.** `Pool.excluding(positions)`:
+
+```
+net[tickLower] -= L ;  net[tickUpper] += L
+if tickLower <= currentTick < tickUpper:  L0 -= L
+```
+
+Both identities must still hold (the edits are equal and opposite, so a break means a
+position's ticks lay outside the scanned profile — the scan was truncated). The ERC-20
+balances still contain the withdrawn tokens, so the cap is the **re-integrated model
+reserve**, not `reserve1`. A negative `L0` means the positions exceed the book: stop.
+
+**Then subtract one more thing.** The remainder still is not "third-party" depth if part
+of it was placed by whoever created the pool. In the case above, $10,000 of a about $10,000
+remainder was a single-sided USDT position **minted in the pool-creation block itself**,
+untouched for a year — a seed bid, not third-party market-making. Genuinely unattributed
+third-party quote was **under $100**. Check every remaining position's mint block against the
+pool's creation block before calling it third-party; `owned_token_ids()` cannot find
+these, because it only enumerates addresses you already suspected.
+
+**3. Issuer net cash.** Walk the book as for a normal sale, carrying `L_issuer` (the
+issuer liquidity active at the current tick, updated at each crossing). Per segment:
+
+```
+own      += seg * L_issuer / L_active        # the issuer paying itself
+external += seg * (1 - L_issuer / L_active)  # cash that actually arrives
+```
+
+`external` is the answer. Measured on the case above: selling 1,000,000 tokens grossed
+roughly $300,000 of which **under $6,000** was new external cash. And the issuer did not exit
+either — the tokens it "sold" now sit inside its own position.
+
+**What is not one of the three:** `total quote − issuer quote`. That is an inventory
+statistic about who funded the book. No participant can execute against it. Labelling it
+"third-party reachable" reported about $10,000 where a 25,000-token sale paid about $17,000 out of
+the full book — the published ceiling was exceeded by a sale a fifth of that size.
+
 ## Simulating a sell
 
 Selling token0 moves price down. Per tick segment, with fee `f` taken from the input:
@@ -108,8 +200,19 @@ The stopping conditions swap accordingly: cumulative output cannot exceed the po
 
 ## Reporting
 
-For each size, report: requested, **actually fillable**, proceeds, average price, post-trade price, drawdown. Then aggregate across every pool on every chain into one figure — **total reachable quote currency** — and set it beside the position's mark-price valuation.
+For each size, report: requested, **actually fillable**, proceeds, average price,
+post-trade price, drawdown, and stop reason. Then, for each of the three numbers above,
+aggregate across **every venue the enumeration step found** — saying how many that was
+and what share of discovered quote they hold — and set the **spot-exit** total beside
+the position's mark-price valuation.
 
-That ratio is usually the headline. A position can be worth tens of millions on paper against a few hundred thousand dollars of reachable liquidity.
+That ratio is usually the headline. A position can be worth tens of millions on paper
+against a few hundred thousand dollars of reachable liquidity. State which of the three
+the denominator is: on one token the same numerator gave roughly 50 : 1 against spot exit and
+nearly 1,900 : 1 against the post-withdrawal counterfactual, and only one of those is what a
+holder faces today.
 
-Note the snapshot block and time. Pools with JIT activity move between blocks.
+Every figure carries four stamps or it is not quotable: the **block**, the
+**timestamp**, the **window** the liquidity census covered, and **which of the three
+numbers it is**. Pools with JIT move between blocks; pools with hundreds of Mint/Burn
+pairs per fortnight move between weeks.

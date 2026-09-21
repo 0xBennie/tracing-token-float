@@ -124,6 +124,8 @@ class Attribution:
     @classmethod
     def from_db(cls, db, exclusions, supply=None, at_block=None, decimals=18,
                 snapshot=None, force=False):
+        from balances import taint as _taint
+        marks = _taint(db)
         bal = rebuild(db, at_block, force)
         rebuilt = sum(h.wei for h in bal.values())
         ts = to_wei(supply, decimals) if supply is not None else rebuilt
@@ -132,7 +134,9 @@ class Attribution:
                 f"stated supply {ts} wei != rebuilt {rebuilt} wei (difference "
                 f"{ts - rebuilt}). Attributing a float derived from a supply the data "
                 f"does not support is how the headline goes wrong while looking fine.")
-        return cls(bal, float_denominator(ts, bal, exclusions, decimals), snapshot, decimals)
+        obj = cls(bal, float_denominator(ts, bal, exclusions, decimals), snapshot, decimals)
+        obj.taint = marks          # travels into report() and to_json(), not just meta
+        return obj
 
     @property
     def universe(self):
@@ -321,6 +325,10 @@ class Attribution:
     def report(self, out=sys.stdout):
         """Output built so that no single line can be lifted out of it and be wrong."""
         p = lambda s: print(s, file=out)
+        # First line AND last line: a reader lifts the middle, so one banner is not
+        # enough. An artefact built over a forced database must say so on the artefact.
+        for t in getattr(self, "taint", []):
+            p(f"!! UNCERTIFIED — {t}")
         dec, F, live = self.dec, self.float_wei, self.live()
         fl = f"{tok(F, dec):,.0f}"
         pc = lambda w: f"{pct_of_float(w, F):.4f}"      # always prints "% of float"
@@ -400,6 +408,8 @@ class Attribution:
         floor = sum(c.wei for c in live if c.tier in FLOOR)
         ceil = sum(c.wei for c in live if c.tier in CEILING)
         return {"snapshot": self.snapshot, "decimals": self.dec,
+                "certified": not getattr(self, "taint", []),
+                "taint": list(getattr(self, "taint", [])),
                 "total_supply_wei": str(self.total_supply),
                 "float_wei": str(self.float_wei),
                 "excluded": {a: w for a, w in self.exclude.items()},
@@ -408,7 +418,8 @@ class Attribution:
                             "source": c.source, "retracted": c.retracted}
                            for c in self.claims],
                 "unattributed_wei": str(sum(self.remainders().values())),
-                "headline": {"floor_tiers": list(FLOOR), "ceiling_tiers": list(CEILING),
+                "headline": {"certified": not getattr(self, "taint", []),
+                             "floor_tiers": list(FLOOR), "ceiling_tiers": list(CEILING),
                              "floor_wei": str(floor), "ceiling_wei": str(ceil),
                              "floor_pct_of_float": float(pct_of_float(floor, self.float_wei)),
                              "ceiling_pct_of_float": float(pct_of_float(ceil, self.float_wei))},

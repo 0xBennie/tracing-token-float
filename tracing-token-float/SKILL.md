@@ -51,6 +51,16 @@ identity gates below may rest on.
 The layer table below says what each layer produces. This says what to actually type.
 Every step is gated: a non-zero exit means STOP, not "note it and continue".
 
+No address, selector or event topic here may be typed from memory — not the position
+manager, not the factory, not a fork's `Swap` topic. Derive each on the chain you are on
+and prove it (`eth_getCode` is not `0x`; the topic actually occurs in this contract's
+logs). `scripts/topics.py` computes every topic from its signature string for exactly
+this reason. A recalled constant does not error: it returns empty, and empty reads as a
+finding. See pitfall #22.
+
+Read each script's `asked / answered / refused` line before you read anything else it
+printed. A run with refusals produced floors, not facts.
+
 ```bash
 cd scripts
 
@@ -84,8 +94,27 @@ python control.py lock  --chain bsc 0xVESTING          # EFFECTIVE lock, not nom
 # L6  Cross-chain, before any percentage. Adding chains up double-counts lock-and-mint.
 python control.py bridge --home eth:0xTOKEN:0xADAPTER --remote bsc:0xTOKEN monad:0xTOKEN
 
-# L7  Whose liquidity is it? Subtract the issuer's own bid from "reachable".
-python positions.py --chain bsc --pool 0xPOOL --issuer 0xLP 0xTREASURY
+# L7a  Enumerate the VENUES before measuring any of them. One pool is not a market.
+#      Factory sweep finds pools with no recent trades; counterparty mining finds
+#      factories you did not list. Neither alone is coverage.
+python venues.py --chain bsc --token 0xTOKEN --quote auto
+#   Every pool with its quote inventory and its SHARE of the total. Exit 2 when the
+#   pools you go on to measure hold under 99% of the quote discovered.
+
+# L7b  Did the book change during the window you are about to describe? Census with NO
+#      topic filter and bucket by topic0 — a fork's Swap topic is not Uniswap's, and a
+#      filtered query that misses it returns [] and reads as "no trades".
+python poolflow.py --chain bsc --pool 0xPOOL --from-block <lo> --to-block <hi>
+#   Mint/Burn/Collect/Swap counts, the pool-leg decomposition, and the identity
+#   Δbalance == Σswap + Σmint − Σcollect − ΣcollectProtocol. "No Mint events" must
+#   survive this: hundreds of Burns with zero Mints is a broken query, not a quiet pool.
+
+# L7c/L7d  Whose liquidity is it, and WHICH of the three exit numbers are you quoting?
+python positions.py --chain bsc --pool 0xPOOL --token 0xTOKEN --issuer 0xLP 0xTREASURY
+#   --token names the SUBJECT token so the quote side is not guessed; without it the
+#   run refuses when the stable registry is ambiguous. Prints all three exit numbers:
+#   spot (whole book), post-withdrawal (counterfactual), and who can withdraw what.
+#   Quoting any one of them as "the" exit liquidity is pitfall #21.
 
 # L2/L8  The tier table, and the gate that makes it publishable.
 python attribute.py --tiers audit.json --out run1.json
@@ -112,7 +141,10 @@ Work bottom-up. Each layer is worthless if the one below it didn't pass its gate
 | **L4 Sybil** | Batch-controlled airdrop claimers | Collision rate compared against a stated null hypothesis |
 | **L5 Control** | Who holds the keys; what the locks are actually worth | Effective lock period computed, not assumed |
 | **L6 Cross-chain** | Bridge mode determined, then per-chain supply reconciled | Lock-and-mint: adapter escrow == remote `totalSupply`. Native burn/mint: per-chain supplies sum to the global total. Residual named per message |
-| **L7 Market** | Depth curve, real *third-party* exit liquidity | `sum(liquidityNet)==0`, below-tick sum == `liquidity()`, and reserves reproduced without exceeding the balance |
+| **L7a Venues** | Every place the token trades, enumerated — not the one pool you found first | The enumeration *method* is stated (factory `getPool` across every fee tier × every quote, V2 `getPair`, plus Transfer-counterparty mining) and the measured pools' share of discovered quote is printed. A depth number from an unenumerated market is a number about one pool wearing the word "market" |
+| **L7b Book stability** | Mint / Burn / Collect / Swap counts inside the reporting window | The census ran with **no topic filter**, bucketed by `topic0`, so a fork's renamed event is a visible unknown instead of a silent zero. `Mint == 0 && Burn > 0` is a broken query, never a quiet pool. A depth figure ships with the window it was measured over |
+| **L7c Position shape** | Every issuer position classified bid / two-sided / ladder | Determined per position from its own ticks against the current tick — never carried over from a previous case. A two-sided position straddling spot is a **real bid** and is nothing like a sell ladder |
+| **L7d Depth** | The three exit numbers, separately labelled (see below) | `sum(liquidityNet)==0`, below-tick sum == `liquidity()`, reserves reproduced without exceeding the balance — and the same two identities re-asserted on the counterfactual book |
 | **L8 Close** | Two independent totals agree | Lineage method and balance method differ only by explainable in-flight amounts |
 
 **L1.5 is the layer most analyses skip, and it decided this one.** Read the pool-creation
@@ -164,7 +196,37 @@ Paper market cap is not exit liquidity. Build the V3 liquidity profile and simul
 - **Self-check:** integrate the profile back into token0/token1 reserves and compare to the pool's actual ERC-20 balances. The model must never EXCEED the balance (fees inflate the balance, not positions) and a shortfall beyond ~25% means the scan window truncated the book. Two structural identities catch truncation that the reserve comparison alone misses: `sum(liquidityNet) == 0` over the full tick range, and the sum below the current tick equalling `liquidity()`. Assert all four.
 - Simulate sells across sizes; report tokens actually fillable, proceeds, average price, and post-trade price
 
-Then state the ratio plainly: **controlled position at mark price, versus total stablecoin reachable across every pool.** This is usually the finding that reframes everything else.
+### Three exit numbers, three different questions. Never merge them.
+
+"How much money is in there for me" has three answers and they can differ fiftyfold.
+Which is correct depends on **who is selling** and **whether the issuer's liquidity is
+still there** — not on who owns it.
+
+| # | Name | Question | How |
+|---|---|---|---|
+| **1** | **Spot exit** | A third party sells N tokens right now — what does it get? | Simulate against the **whole book, unmodified**. The AMM pays out of whatever is at the tick; it does not know who provided it. This is "can a holder get out today" |
+| **2** | **Post-withdrawal exit** | The issuer pulls its liquidity first — what is left? | `depth.Pool.excluding(issuer_positions)`, which re-asserts both identities and caps the book at the re-integrated model reserve. A **counterfactual**; label it as one |
+| **3** | **Issuer net cash** | The issuer dumps its own bag — what actually reaches it? | Attribute each tick segment's output by liquidity share: `seg * L_issuer / L_active` is it paying itself. The remainder is external cash |
+
+`total quote − issuer quote` is **none of these**. It is an inventory statistic — who
+funded the book — and nobody can execute against it. Reporting it as "what a third party
+can reach" understated a live, crossing, two-sided issuer bid of **roughly $360,000** as
+**about $10,000**, while a 10,000-token sale at that moment paid **about $6,800** out of the full
+book. Three numbers, one sentence, all wrong.
+
+Whether the subtraction means anything at all is decided at L7c. A position sitting
+entirely on the far side of spot holds only the subject token: a limit-order ladder,
+contributing zero quote, and subtracting it changes nothing. A position **straddling
+spot** holds real quote below the price and is, to a seller, indistinguishable from a
+stranger's bid. Read the ticks; do not inherit a verdict.
+
+Then ask what makes number 1 meaningful: **can they execute number 2 at will?**
+`ownerOf` every position NFT. An EOA with no timelock means the counterfactual is one
+transaction away, and the honest sentence carries all three: *"a seller can reach X
+today, of which Y% is the issuer's and withdrawable in a single call, leaving Z."*
+
+Then state the ratio plainly: **controlled position at mark price, versus number 1
+summed across every venue L7a enumerated** — and say how many venues that was.
 
 ## Verification
 
@@ -191,6 +253,12 @@ Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above)
 | Weighted lineage on a high-frequency address | Its own churn dilutes provenance to noise; use the first-funding tx and pool-creation-block position — a net balance fails the same way |
 | Classifying behaviour from net flow or buy/sell counts | Both discard time; a one-block snipe followed by six weeks of distribution reads as accumulation |
 | Treating a passed screen as a verdict | The most convincing candidates fail mechanically — fee claims and exchange wallets both mimic accumulation |
-| Totalling exit liquidity without attributing LP ownership | The issuer's own bid counts as depth it can sell into; report third-party reachable quote separately |
+| Quoting one exit number without saying which of the three it is | "about $10,000 reachable" while a sale right then paid out of a roughly $360,000 issuer bid — the answer to a question nobody asked, published as the answer to the one they did |
+| Subtracting the issuer's LP from what a THIRD PARTY can sell into | An AMM pays from whatever is at the tick. Subtract the issuer only for its own net cash, or for the counterfactual where it withdrew first |
+| Measuring one pool and calling it the market | Venue coverage was never established; the headline silently means "in the pool I happened to open" |
+| Netting the pool address's Transfer legs | Mint, Burn and Collect legs are counted as buys and sells; "net flow to market" becomes a number about liquidity provisioning — off by over 4x in one case |
+| Concluding "no liquidity events" from a Mint-only query | Burn and Collect are separate events, and a mistyped topic returns `[]` without error. The depth conclusion's expiry date is exactly this check |
+| Ranking sellers by tokens transferred to the pool | 6 of 24 such transfers were `Mint`; the "seller" was providing 97% of what it looked like it was dumping |
+| Calling an intermediary a shell because issuer tokens passed through it | It was a public MEV router handling other tokens in the same period, and the cumulative figure quoted was its lifetime total, not this episode's |
 | Reporting assumed attribution as fact | One rebuttal discredits the whole analysis |
 | Quoting market cap without depth | The headline risk number is off by orders of magnitude |

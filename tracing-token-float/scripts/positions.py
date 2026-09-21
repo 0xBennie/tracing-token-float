@@ -25,6 +25,7 @@ PancakeSwap V3, Aerodrome Slipstream and forks nobody has written down.
 import argparse, json, sys
 from collections import defaultdict
 from rpc import Client, BASE, BSC, ETH, LOG_EPS, MAX_SPAN, RangeError, s256
+from scan import STABLES
 from depth import Pool, InconsistentState, MIN_TICK, MAX_TICK
 
 try:
@@ -89,20 +90,37 @@ def recent_mint_owners(cli, pool, hi, chain, window=60_000):
     """
     span = MAX_SPAN.get(chain, 2000)
     seen, cur = {}, hi
+    asked = answered = refused = 0
     while cur > hi - window and not seen:
         lo = max(1, cur - span + 1)
+        asked += 1
         try:
             logs = cli.call("eth_getLogs", [{"address": pool, "topics": [MINT],
                                              "fromBlock": hex(lo), "toBlock": hex(cur)}])
         except RangeError:
+            asked -= 1                      # not a question the chain declined to answer
             span = max(1, span // 2)
             continue
-        except Exception:
+        except Exception as e:
+            # "this range holds no Mint" and "the node would not answer" arrived here
+            # through the same branch, and only the first is data. When every window is
+            # refused this returned {} and the caller printed "no position manager
+            # found", which is the node's silence published as a fact about the pool.
+            refused += 1
+            print(f"     Mint window #{lo:,}-#{cur:,} NOT ANSWERED ({str(e)[:60]})")
             cur = lo - 1
             continue
+        answered += 1
         for l in logs:
             seen.setdefault("0x" + l["topics"][1][-40:], l["transactionHash"])
         cur = lo - 1
+    print(f"     Mint scan: asked {asked} answered {answered} refused {refused}")
+    if not seen and refused:
+        raise RuntimeError(
+            f"{refused} of {asked} Mint windows were never answered and the answered "
+            f"ones held no Mint. Reporting 'no position manager' from that would be "
+            f"absence of evidence published as evidence of absence. Retry, or pass "
+            f"--nfpm (it is verified before use).")
     return seen
 
 
@@ -185,7 +203,7 @@ def discover_nfpm(cli, owners, pool_t0, pool_t1, pool_fee):
     return None
 
 
-def collect(cli, gcli, pool_addr, issuers, hi, chain):
+def collect(cli, gcli, pool_addr, issuers, hi, chain, nfpm=None, token=None):
     """The issuer's live positions in this pool, and the pool's totals.
 
     Asked the other way round — enumerate every position and see who owns them — this
@@ -202,13 +220,53 @@ def collect(cli, gcli, pool_addr, issuers, hi, chain):
     sqrtP, tick = int(s0[:64], 16) / 2 ** 96, s256(int(s0[64:128], 16))
     print(f"  pool {pool_addr}  {sym(cli,t0)}/{sym(cli,t1)}  fee {fee/1e4:.2f}%  tick {tick}")
 
-    print(f"  identifying the position manager from recent Mints…")
-    owners = recent_mint_owners(gcli, pool_addr, hi, chain)
-    nfpm = discover_nfpm(cli, list(owners), t0, t1, fee)
-    if not nfpm:
-        raise RuntimeError("no position manager found among recent Mint owners — this "
-                           "pool may be minted against directly; pass --nfpm")
-    print(f"     position manager: {nfpm}")
+    # WHICH SIDE IS THE QUOTE. Uniswap-style pools sort token0/token1 by address, so
+    # whether the quote is token0 or token1 is a coin flip per pool. This tool used to
+    # assume token1 and printed the SUBJECT TOKEN's amount under the label "quote a
+    # third party can reach" — a number in the wrong unit that still looked plausible.
+    # Decide it explicitly, and refuse rather than guess.
+    stables = STABLES.get(chain, {})
+    if token:
+        token = token.lower()
+        if token not in (t0, t1):
+            raise RuntimeError(f"--token {token} is neither side of this pool "
+                               f"({t0} / {t1}).")
+        flip = (t0 != token)                      # flip => subject is token1
+    elif (t0 in stables) != (t1 in stables):
+        flip = t1 not in stables                  # the stable side is the quote
+        print(f"     quote side inferred from the stable registry: "
+              f"{'token0 ' + sym(cli,t0) if not flip else 'token1 ' + sym(cli,t1)}")
+    else:
+        raise RuntimeError(
+            f"cannot tell which side of this pool is the quote ({sym(cli,t0)}/"
+            f"{sym(cli,t1)}); neither or both are known stables. Pass --token <subject "
+            f"token address>. Guessing here reports one token's amount in the other's "
+            f"unit, and the figure looks entirely reasonable.")
+    qsym, tsym = (sym(cli, t0), sym(cli, t1)) if flip else (sym(cli, t1), sym(cli, t0))
+    print(f"     subject {tsym}, quote {qsym}"
+          f"   (quote is token{'0' if flip else '1'})")
+
+    if nfpm:
+        # A caller-supplied address is the likeliest way a RECALLED constant enters this
+        # tool, and a wrong one does not raise: eth_call against an address with no code
+        # returns 0x, which decodes to "holds no positions". A run once passed a position
+        # manager address written from memory; eth_getCode on it returned 0 bytes — no
+        # contract there at all — and the pool read as having no NFT positions.
+        nfpm = nfpm.lower()
+        if (cli.call("eth_getCode", [nfpm, "latest"]) or "0x") == "0x":
+            raise RuntimeError(
+                f"--nfpm {nfpm} has NO CODE on {chain}. That is not a position manager, "
+                f"it is a recalled address. Read the owner field of this pool's own Mint "
+                f"logs instead of supplying one.")
+        print(f"     position manager: {nfpm}  (--nfpm, code verified)")
+    else:
+        print(f"  identifying the position manager from recent Mints…")
+        owners = recent_mint_owners(gcli, pool_addr, hi, chain)
+        nfpm = discover_nfpm(cli, list(owners), t0, t1, fee)
+        if not nfpm:
+            raise RuntimeError("no position manager found among recent Mint owners — this "
+                               "pool may be minted against directly; pass --nfpm")
+        print(f"     position manager: {nfpm}")
 
     rows, unreadable = [], []
     for owner in issuers:
@@ -246,7 +304,8 @@ def collect(cli, gcli, pool_addr, issuers, hi, chain):
         print(f"     {o}: could not enumerate NFTs ({e})")
         print(f"       its positions are in NEITHER figure below")
     return dict(token0=t0, token1=t1, fee=fee, d0=d0, d1=d1, tick=tick, sqrtP=sqrtP,
-                nfpm=nfpm, rows=rows, unreadable=unreadable,
+                nfpm=nfpm, rows=rows, unreadable=unreadable, flip=flip,
+                qsym=qsym, tsym=tsym,
                 sym0=sym(cli, t0), sym1=sym(cli, t1))
 
 
@@ -303,30 +362,81 @@ def report(res, issuers, cli, pool_addr, as_json=False):
 
     # The pool total is an INDEPENDENT measurement. Summing the positions we happened
     # to enumerate would make every pool look 100% issuer-owned by construction.
-    print(f"\n  EXIT LIQUIDITY, MINUS THE ISSUER'S OWN BID")
-    tot0 = tot1 = None
+    #
+    # THREE NUMBERS, THREE QUESTIONS. This block used to print one — "quote a third
+    # party can reach" = total quote minus issuer quote — and call it the number that
+    # matters. That is an inventory statistic about who FUNDED the book, and nobody can
+    # execute against it. An AMM pays out of whatever liquidity sits at the tick it is
+    # crossing; it does not know who minted it. On a pool whose issuer position
+    # straddles spot, that subtraction understated a real $357k bid as $10k.
+    flip = res.get("flip", True)
+    qsym, tsym = res.get("qsym", s0), res.get("tsym", s1)
+    iss_q = iss0 if flip else iss1          # quote held inside the issuer's positions
+    print(f"\n  EXIT LIQUIDITY — three numbers, three different questions")
+    pool = None
     try:
         pool = Pool(cli, pool_addr, d0, d1)
         c = pool.check
-        tot0, tot1 = c["model0"], c["model1"]
-        print(f"    {s1} in the pool's whole book     {tot1:>16,.2f}"
-              f"   (depth.py tick profile, independent of the rows above)")
+        tot_q = c["model0"] if flip else c["model1"]
     except InconsistentState as e:
-        print(f"    the tick profile failed its own self-check, so there is no pool total")
-        print(f"    to subtract from: {str(e)[:120]}")
-    print(f"    {s1} in the issuer's positions    {iss1:>16,.2f}")
-    if tot1:
-        share = iss1 / tot1 * 100 if tot1 else 0
-        third = tot1 - iss1
-        print(f"    {s1} a third party can reach      {third:>16,.2f}   <- the number that matters")
-        print(f"    the issuer is {share:.1f}% of the quote in this pool")
+        print(f"    the tick profile failed its own self-check, so there are no exit")
+        print(f"    numbers at all: {str(e)[:140]}")
+        tot_q = None
+
+    if tot_q:
+        share = iss_q / tot_q * 100 if tot_q else 0
+        # flip is True when the SUBJECT token is token1, and selling token1 is
+        # sell1(). Getting this backwards charts the other half of the book and
+        # prints the reciprocal price, which still looks like a price.
+        sell = (lambda n: pool.sell1(n)) if flip else (lambda n: pool.sell(n))
+        # 1. SPOT EXIT — what a third party gets right now, whole book, no subtraction.
+        print(f"\n    [1] SPOT EXIT — a third party sells NOW, against the whole book")
+        print(f"        Ownership is irrelevant here: the pool pays from whatever is at")
+        print(f"        the tick. This is the number for 'can a holder get out today'.")
+        for n in (1_000, 10_000, 100_000):
+            try:
+                r = sell(n)
+                print(f"          sell {n:>9,.0f} {tsym:<8} -> {r['proceeds']:>14,.2f} {qsym}"
+                      f"   avg {r['avg']:.6g}   {r['stop']}")
+            except Exception as e:
+                print(f"          sell {n:>9,.0f} {tsym:<8} -> unavailable ({str(e)[:50]})")
+        print(f"          absolute ceiling (drain the book) {tot_q:>14,.2f} {qsym}")
+
+        # 2. POST-WITHDRAWAL EXIT — the counterfactual, and labelled as one.
+        iss_pos = [(r["tick_lower"], r["tick_upper"], r["liquidity"]) for r in res["rows"]]
+        print(f"\n    [2] POST-WITHDRAWAL EXIT — COUNTERFACTUAL: the issuer pulls its")
+        print(f"        {len(iss_pos)} position(s) first, then a third party sells")
+        try:
+            cf = pool.excluding(iss_pos)
+            cf_sell = (lambda n: cf.sell1(n)) if flip else (lambda n: cf.sell(n))
+            cf_q = cf.check["model0"] if flip else cf.check["model1"]
+            for n in (1_000, 10_000, 100_000):
+                try:
+                    r = cf_sell(n)
+                    print(f"          sell {n:>9,.0f} {tsym:<8} -> {r['proceeds']:>14,.2f} {qsym}"
+                          f"   avg {r['avg']:.6g}   {r['stop']}")
+                except Exception as e:
+                    print(f"          sell {n:>9,.0f} {tsym:<8} -> unavailable ({str(e)[:50]})")
+            print(f"          absolute ceiling                  {cf_q:>14,.2f} {qsym}")
+            print(f"          -> this is a COUNTERFACTUAL. It is what remains if they")
+            print(f"             withdraw, not what anyone can get today.")
+        except InconsistentState as e:
+            print(f"          cannot be computed: {str(e)[:140]}")
+
+        # 3. Whether the issuer can execute [2] at will.
+        print(f"\n    [3] CAN THEY? the issuer holds {share:.2f}% of the {qsym} in this book")
+        print(f"        Check every position NFT for a lock before treating [1] as stable:")
+        print(f"        ownerOf() an EOA with no timelock means [2] is one transaction away.")
         if share > 50:
-            print(f"    It selling into its own bid moves money between its own pockets.")
-            print(f"    Net cash to the issuer from that portion is zero, and the depth a")
-            print(f"    third-party seller actually meets is the smaller number above.")
-        if iss1 > tot1 * 1.01:
+            print(f"        The issuer selling into its OWN bid is money moving between its")
+            print(f"        own pockets — that is a third number again (issuer net cash),")
+            print(f"        and it is NOT [1] and NOT [2].")
+        if iss_q > tot_q * 1.01:
             print(f"    !! the issuer's positions exceed the whole book. One of the two")
             print(f"       measurements is wrong — do not publish either.")
+        print(f"\n    inventory note (NOT an exit number): {qsym} funded by third parties")
+        print(f"      = {tot_q - iss_q:,.2f}. Nobody can execute against this. It is here")
+        print(f"      only so it is never again printed under the word 'reach'.")
 
     ladders = [r for r in res["rows"] if classify(r, tick, px) == "ladder"]
     if ladders:
@@ -348,10 +458,23 @@ def report(res, issuers, cli, pool_addr, as_json=False):
         print(f"      positions are in neither figure. The split above is a FLOOR.")
 
     if as_json:
-        print("\n" + json.dumps({"positions": res["rows"], "spot": spot,
-                                 "quote_pool": tot1, "quote_issuer": iss1,
-                                 "quote_third_party": (tot1 - iss1) if tot1 else None},
-                                indent=1, default=str))
+        # No key here may be named for a question it does not answer. The old shape
+        # was {quote_pool, quote_issuer, quote_third_party} in token1's unit regardless
+        # of which side was the quote, and "quote_third_party" was read as exit
+        # liquidity. Both defects shipped.
+        print("\n" + json.dumps({
+            "positions": res["rows"], "spot": spot,
+            "quote_symbol": qsym, "subject_symbol": tsym,
+            "quote_is_token0": bool(flip),
+            "quote_in_book": tot_q,
+            "quote_inside_issuer_positions": iss_q,
+            "quote_funded_by_third_parties": (tot_q - iss_q) if tot_q else None,
+            "_note": ("quote_funded_by_third_parties is an INVENTORY statistic, not an "
+                      "exit number: no participant can execute against it. For what a "
+                      "seller actually gets, simulate against the whole book (spot "
+                      "exit); for what remains if the issuer withdraws, use "
+                      "Pool.excluding() (post-withdrawal exit). See pitfalls #21.")},
+            indent=1, default=str))
 
 
 def main():
@@ -362,6 +485,10 @@ def main():
                    help="the issuer's addresses. Their positions are enumerated and "
                         "subtracted from the book to give third-party reachable quote")
     p.add_argument("--nfpm", help="position manager, if discovery cannot find it")
+    p.add_argument("--token", help="the SUBJECT token (the one being audited). Without "
+                        "it the quote side is inferred from the stable registry, and if "
+                        "that is ambiguous the run refuses rather than guessing — a "
+                        "guess here reports one token's amount in the other's unit")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
 
@@ -369,11 +496,12 @@ def main():
     gcli = Client(LOG_EPS[a.chain])
     issuers = [x.lower() for x in a.issuer]
     hi = cli.block_number()
-    if a.nfpm:
-        # Skip discovery entirely when the caller already knows it.
-        import positions as _self
-        _self.discover_nfpm = lambda *_, **__: a.nfpm.lower()
-    res = collect(cli, gcli, a.pool.lower(), issuers, hi, a.chain)
+    # NOT a monkeypatch. `import positions as _self` from inside `python positions.py`
+    # loads a SECOND copy of this module under the name "positions" and patches that
+    # copy; collect() lives in __main__ and kept resolving the original, so --nfpm was
+    # accepted, silently ignored, and answered with "pass --nfpm" — a closed loop.
+    res = collect(cli, gcli, a.pool.lower(), issuers, hi, a.chain,
+                  nfpm=a.nfpm, token=a.token)
     report(res, issuers, cli, a.pool.lower(), a.json)
 
 
