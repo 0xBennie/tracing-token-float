@@ -304,6 +304,48 @@ class Pool:
         """Price of token1 denominated in token0."""
         return 1 / self.price
 
+    def excluding(self, positions):
+        """A counterfactual book with the named positions removed.
+
+        This is the ONLY correct way to answer "what is left if they withdraw". The
+        subtraction people reach for instead — total quote in the book minus the quote
+        inside their positions — answers a different question, and on a position that
+        straddles spot it is wrong by the entire bid. Ownership of liquidity does not
+        change what an AMM pays a seller; only removing the liquidity does.
+
+        `positions`: iterable of (tick_lower, tick_upper, liquidity), exactly the rows
+        positions.py enumerates. Returns a NEW Pool; the original is untouched.
+        """
+        import copy
+        p = copy.copy(self)
+        p.net, p.L0 = dict(self.net), self.L0
+        for tl, tu, liq in positions:
+            liq = int(liq)
+            if tl not in p.net or tu not in p.net:
+                raise InconsistentState(
+                    f"position [{tl},{tu}] has ticks outside the scanned profile — the "
+                    f"scan was truncated, so nothing may be subtracted from it")
+            p.net[tl] -= liq
+            p.net[tu] += liq
+            if tl <= self.tick < tu:
+                p.L0 -= liq
+        if p.L0 < 0:
+            raise InconsistentState(
+                f"removing those positions takes active liquidity negative ({p.L0}): the "
+                f"positions exceed the book, so one of the two measurements is wrong. "
+                f"Publish neither.")
+        p.ticks = sorted(p.net)
+        c = p.selfcheck()
+        if not (c["id_sum_zero"] and c["id_active_liquidity"]):
+            raise InconsistentState(
+                f"counterfactual book fails its structural identities "
+                f"(sum_net={c['sum_net']}) — the subtraction was not equal-and-opposite")
+        # The pool's ERC-20 balances still contain the withdrawn tokens, so they are not
+        # this book's reserves. Re-integrating gives what the pool would actually hold.
+        p.reserve0, p.reserve1 = c["model0"], c["model1"]
+        p.check = p.selfcheck()
+        return p
+
     def curve(self, sizes, token1=False):
         """Depth curve. Pass token1=True when the token you are selling is the pool's
         token1 — otherwise this charts the wrong side of the book for half of all

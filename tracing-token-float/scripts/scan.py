@@ -4,8 +4,15 @@
     python scan.py --chain base --token 0xABC... --holdings 100000000
 
     1. Can they print more, freeze you, or drain the escrow?   (privileges)
-    2. How much is reachable if the float hits the book?       (exit liquidity)
+    2. What does a seller get against the book AS IT STANDS?   (SPOT EXIT)
     3. What is the paper position worth against that?          (the ratio)
+
+The depth figure here is exit number ONE of the three in pitfall #21: the whole
+book, untouched, which is what a holder selling right now actually receives. This
+tool does NOT attribute LP ownership, so it cannot tell you how much of that book
+is the issuer's own bid — and on one token that was over 99% of it, withdrawable
+in a single transaction, leaving under $100 behind. Never quote this number as
+"third-party" or "real" liquidity. Run positions.py for the other two.
 
 Deliberately does NOT compute "the team controls X% of float". That number is
 expensive to produce, mostly restates the published allocation table, and rarely
@@ -310,7 +317,16 @@ def main():
 
     reachable = sum(b["reachable"] * b["rate"] for b in by_quote.values() if b["rate"])
     tvl = sum(b["tvl"] * b["rate"] for b in by_quote.values() if b["rate"])
-    out["reachable_usd"], out["displayed_tvl_usd"] = reachable, tvl
+    # Named for the question it answers. "reachable_usd" kept as an alias so older
+    # callers do not silently read zero, but the honest key is the one with the number
+    # in it: this is exit number 1 of the three in pitfall #21, not third-party depth.
+    out["spot_exit_usd"] = reachable
+    out["reachable_usd"] = reachable          # deprecated alias
+    out["post_withdrawal_exit_usd"] = None    # positions.py computes this
+    out["_exit_note"] = ("spot_exit_usd is the WHOLE book including any issuer LP. It is "
+                         "not third-party depth and not what survives the issuer "
+                         "withdrawing. See pitfalls #21 and run positions.py.")
+    out["displayed_tvl_usd"] = tvl
     out["by_quote"] = by_quote
     out["skipped_pools"] = [{"pool": s[0], "why": s[1], "detail": s[2]} for s in skipped]
 
@@ -352,14 +368,24 @@ def main():
             print(f"  ! pools disagree on price: ${min(spread):,.6g} … ${max(spread):,.6g} "
                   f"— using ${px:,.6g}\n")
     print(f"  displayed liquidity (TVL style)   ${tvl:,.0f}")
-    print(f"  actually reachable by selling     ${reachable:,.0f}"
+    print(f"  [1] SPOT EXIT — sellable right now ${reachable:,.0f}"
           + (f"   ({tvl/reachable:.1f}x overstated)" if reachable > 0 else ""))
+    print(f"      whole book, untouched. This is what a holder selling TODAY receives,")
+    print(f"      whoever provided the liquidity — an AMM pays from whatever is at the tick.")
+    print(f"  [2] POST-WITHDRAWAL EXIT             not computed here")
+    print(f"      what is left if the issuer pulls its own positions first. Requires LP")
+    print(f"      attribution, which this tool does not do:")
+    print(f"        python positions.py --chain {a.chain} --pool <pool> --token {tok} --issuer <addr>...")
+    print(f"      On one token [1] was over 99% the issuer's own bid, withdrawable in a")
+    print(f"      single transaction, and [2] was under $100. Until you have run that,")
+    print(f"      [1] above is a number the issuer can revoke, not depth you can rely on.")
     if a.holdings and px:
         paper = a.holdings * px
         out["paper_value_usd"] = paper
         print(f"  position at mark price            ${paper:,.0f}  ({a.holdings:,.0f} tokens @ ${px:.6g})")
         if reachable > 0:
-            print(f"  paper : reachable                 {paper/reachable:,.0f} : 1")
+            print(f"  paper : [1] spot exit             {paper/reachable:,.0f} : 1")
+            print(f"      against [2] this ratio is larger, often by orders of magnitude.")
     if live:
         print(f"\n  !! live unilateral control path: {live}")
         print("     supply or escrow can move without warning — the liquidity number above")

@@ -31,7 +31,8 @@ import argparse, sqlite3, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from rpc import Client, LOG_EPS, MAX_SPAN, RangeError
 
-TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+from topics import T as _T
+TRANSFER = _T["erc20.Transfer"]   # derived, never typed
 TOTAL_SUPPLY = "0x18160ddd"
 # Fixed, and taken from rpc.MAX_SPAN — the measured ceiling of the endpoint pool, not a
 # hopeful default. Growing the span against a silently-truncating node is how a window

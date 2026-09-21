@@ -82,19 +82,27 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             27 traps that corrupt results while every number still looks fine
+    pitfalls.md             30 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
-    scan.py                 the three-number pass — start here
+    scan.py                 the three-number pass — start here (its depth figure is
+                            SPOT EXIT only; see positions.py for the other two)
     privileges.py           selector extraction from bytecode + live-control proof
     rpc.py                  rotating JSON-RPC; separate endpoint pools for historical logs
     replay.py               parallel event replay into SQLite + the coverage and supply gates
     balances.py             exact rebuild, and the float denominator that closes in wei
     control.py              Safe signer intersection, effective lock, cross-chain supply
-    positions.py            V3 liquidity attributed to owners; third-party reachable quote
+    positions.py            V3 liquidity attributed to owners, and the three exit numbers:
+                            spot, post-withdrawal counterfactual, and who can withdraw
     attribute.py            the tier table, the closure gate, and the re-audit diff
     lineage.py              weighted provenance, net-flow, first-funder
-    depth.py                V3 profile, structural identities, sell simulator (both directions)
+    depth.py                V3 profile, structural identities, sell simulator (both directions),
+                            and excluding() for the post-withdrawal counterfactual
+    topics.py               event topics computed from signatures, never stored as hashes;
+                            unfiltered census and the Mint==0-while-Burn>0 check
+    poolflow.py             window event census, Swap-only flow, and the closing identity
+    venues.py               every venue the token trades on: factory sweep + counterparty
+                            mining, factories round-trip verified and learned
 ```
 
 ## Install

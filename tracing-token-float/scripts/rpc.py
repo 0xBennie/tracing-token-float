@@ -8,7 +8,7 @@ call, retry with backoff, and keep batches at or below ~120 items.
     c.eth_call(token, "0x18160ddd")                       # totalSupply
     c.batch([("eth_call", [{"to": p, "data": d}, "latest"]) for d in datas])
 """
-import itertools, time, requests
+import atexit, collections, itertools, sys, time, requests
 
 # Two pools, because they are two different capabilities. Most public nodes serve
 # eth_call at `latest` happily and are PRUNED for historical eth_getLogs — and a
@@ -110,6 +110,97 @@ RATE_SIGNS = ("rate limit", "too many request", "429", "capacity", "throttl",
               "usage limit", "reached the maximum api")
 
 
+
+# An execution revert is the CHAIN answering. It is not a refusal, it will say the same
+# thing on every endpoint, and rotating through them to collect the same revert wastes
+# the rate limit that the next real question needs. Pitfall #26 draws this line and the
+# first version of this census ignored it: a contract with no owner() reported "1 request
+# never answered", which is both wrong and the exact confusion the census exists to stop.
+REVERT_SIGNS = ("execution reverted", "revert", "invalid opcode", "out of gas",
+                "stack underflow", "invalid jump")
+
+
+class RevertError(RuntimeError):
+    """The chain answered, and the answer was a revert. Data, not a refusal."""
+
+    def __init__(self, msg, data=None):
+        super().__init__(msg)
+        self.data = data
+
+
+class Census:
+    """asked / answered / refused, for the whole process, printed whether you remember
+    to or not.
+
+    Pitfall #26 says to count refusals and print the count. It said so for a long time
+    while `Client` carried no counter at all, so the discipline lived in whoever
+    remembered it — and a run that answered 13 of 20 windows printed the same-looking
+    report as one that answered 20 of 20. Counting here, at the transport, is the only
+    place it cannot be forgotten.
+
+    Counted once per LOGICAL request, never per retry: the question is how many of the
+    questions the analysis asked came back answered, not how many round trips it cost.
+    `empty` counts answers that WERE data but came back `[]` — the shape a pruned node
+    fakes — so they sit beside the refusals instead of inside them.
+    """
+
+    def __init__(self):
+        self.asked = collections.Counter()
+        self.answered = collections.Counter()
+        self.refused = collections.Counter()
+        self.empty = collections.Counter()
+        self.reverted = collections.Counter()
+
+    def totals(self):
+        return (sum(self.asked.values()), sum(self.answered.values()),
+                sum(self.refused.values()), sum(self.empty.values()))
+
+    def reverts(self):
+        return sum(self.reverted.values())
+
+    def line(self):
+        a, k, r, e = self.totals()
+        return (f"RPC CENSUS  asked {a:,}  answered {k:,}  refused {r:,} "
+                f"({(r / a * 100 if a else 0):.1f}%)  empty-but-answered {e:,}  "
+                f"reverted-by-chain {self.reverts():,}")
+
+
+CENSUS = Census()
+
+
+def _print_census():
+    a, k, r, e = CENSUS.totals()
+    if not a:
+        return
+    print("\n  " + CENSUS.line(), file=sys.stderr)
+    for m in sorted(CENSUS.asked):
+        print(f"    {m:<26} asked {CENSUS.asked[m]:>7,}  answered {CENSUS.answered[m]:>7,}"
+              f"  refused {CENSUS.refused[m]:>7,}  empty {CENSUS.empty[m]:>7,}",
+              file=sys.stderr)
+    if CENSUS.reverts():
+        print(f"    ({CENSUS.reverts():,} call(s) reverted — that is the CHAIN answering, "
+              f"counted as answered, not as a refusal.)", file=sys.stderr)
+    if r:
+        print(f"    !! {r:,} request(s) were never answered. Every 'none found', 'no "
+              f"events', 'no pool', 'no position manager' above is a FLOOR, not a fact "
+              f"(pitfall #26).", file=sys.stderr)
+
+
+# Registered at import, so no script can forget to print it and no run can look clean
+# merely because its author did not think to ask.
+atexit.register(_print_census)
+
+
+def census_gate(max_refused_pct=0.0, what="conclusion"):
+    """Exit non-zero when too much of the run went unanswered. Call before publishing."""
+    a, _, r, _ = CENSUS.totals()
+    if a and (r / a * 100) > max_refused_pct:
+        sys.exit(f"REFUSED: {r:,}/{a:,} requests unanswered ({r / a * 100:.1f}%). A "
+                 f"{what} drawn over that is absence of evidence reported as evidence "
+                 f"of absence (pitfall #26). Re-run, or print the coverage next to "
+                 f"the number.")
+
+
 class Client:
     def __init__(self, endpoints, timeout=30):
         self.endpoints, self.timeout = list(endpoints), timeout
@@ -120,6 +211,7 @@ class Client:
         self._dead = set()       # endpoints that can never serve this method
 
     def call(self, method, params, tries=6):
+        CENSUS.asked[method] += 1
         last, rng = None, 0
         for i in range(tries):
             url = next(self._rr)
@@ -156,6 +248,15 @@ class Client:
                         continue
                     if any(k in msg for k in RATE_SIGNS):
                         time.sleep(1.5 * (i + 1))     # back off, do NOT split the window
+                        continue
+                    if any(k in msg for k in REVERT_SIGNS):
+                        # The chain answered. Every other endpoint will answer the same,
+                        # so stop here instead of burning the rotation on it.
+                        CENSUS.answered[method] += 1
+                        CENSUS.reverted[method] += 1
+                        raise RevertError(f"{method} reverted :: {j['error']}",
+                                          data=(j["error"].get("data")
+                                                if isinstance(j["error"], dict) else None))
                     continue
                 if "result" not in j:
                     last = f"{url}: reply had neither result nor error"
@@ -163,15 +264,23 @@ class Client:
                 if j["result"] is None:
                     last = f"{url}: result=null"      # never hand None to a caller
                     continue
-                return j["result"]
-            except RangeError:
-                raise
+                return self._answered(method, j["result"])
+            except (RangeError, RevertError):
+                raise                 # a revert is the chain's answer; do not retry it
             except Exception as e:
                 last = f"{url}: {e}"
             time.sleep(0.35 * (i + 1))
         if rng and rng >= min(tries, len(self.endpoints)):
+            CENSUS.refused[method] += 1
             raise RangeError(f"every endpoint refused the range :: {last}")
+        CENSUS.refused[method] += 1
         raise RuntimeError(f"rpc failed [{method}] :: {last}")
+
+    def _answered(self, method, result):
+        CENSUS.answered[method] += 1
+        if isinstance(result, list) and not result:
+            CENSUS.empty[method] += 1
+        return result
 
     def batch(self, reqs, tries=6):
         """reqs: [(method, params), ...] -> [result, ...] in the same order."""

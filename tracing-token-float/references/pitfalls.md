@@ -251,18 +251,74 @@ routinely defeated by pass-through shells. The signature to look for instead:
 Walk 3–5 hops with test-transfer detection before concluding independence, and treat
 "funded before the pool existed" as near-decisive on its own.
 
-## 21. Exit liquidity minus the issuer's own bid
+## 21. "Exit liquidity" is three numbers, and subtracting the issuer's LP answers only two of them
 
-Summing the quote currency across pools overstates what a *seller* can reach whenever the
-issuer is also the liquidity provider. In the case above, **99.3% of the quote token in the
-main pool sat in the issuer's own LP positions**, priced 45–82% below spot. The issuer
-selling into that is moving its own money between its own pockets — net cash zero.
+You attribute the pool's quote by `ownerOf`, subtract the issuer's share, and publish the
+remainder as what a seller can reach. The arithmetic is right and the label is wrong. An
+AMM pays out of whatever liquidity sits at the tick it is crossing; it has no idea who
+minted it. **Who owns the money and who is selling are different questions, and the
+subtraction belongs only to the second.**
 
-Attribute every LP position by `ownerOf` before totalling, then report two numbers: total
-reachable quote, and **third-party** reachable quote. The second is the one that matters.
-The same audit distinguishes a sell ladder from liquidity: a position whose range sits
-entirely above spot holds only the token and is a limit-order ladder — 98% of the issuer's
-LP was parked at 1.8–9× spot.
+The first version of this entry was written from a case where 99.3% of the main pool's
+quote sat in issuer positions parked at 1.8–9× spot — a sell ladder holding only the
+token. There, subtracting was nearly free, because a ladder contributes no quote to
+subtract. It generalised badly. The next case had a **two-sided position straddling
+spot** holding roughly $360,000 of real USDT below the price. The same subtraction reported that
+a third party could reach **about $10,000**. A 10,000-token sale at that moment actually paid
+**about $6,800** out of the full book, and the book's ceiling was that whole roughly $360k. The
+published figure was off by 35×, in the reassuring direction.
+
+**First classify every issuer position. Shape is a property of ticks, not of owners:**
+
+| Shape | Test, per `tokenId` | Holds | Absorbs a sale? |
+|---|---|---|---|
+| **Ladder** | range entirely on the far side of spot from the quote | subject token only | No — it competes with your sale |
+| **Bid** | range entirely on the quote side of spot | quote only | Yes, fully, for anyone |
+| **Two-sided** | `tickLower <= currentTick < tickUpper` | both; quote on one side | Yes, fully, for anyone |
+
+One owner routinely holds all three in one pool. Classify per position and sum by shape —
+never from the owner's total, and never from what the last audit found.
+
+**Then report three numbers under three names:**
+
+1. **Spot exit** — simulate against the **whole book, untouched**. What a holder gets
+   today. Ownership does not enter the computation.
+2. **Post-withdrawal exit** — remove the issuer's positions from the profile
+   (`net[tickLower] -= L`, `net[tickUpper] += L`, `L0 -= L` when it straddles), re-assert
+   both structural identities, re-simulate. The pool's ERC-20 balances still hold the
+   withdrawn tokens, so the cap here is the **re-integrated model reserve**, not the
+   balance. This is a **counterfactual** — the rug case — and must be labelled as one.
+   `depth.Pool.excluding()` does exactly this and refuses when the subtraction breaks an
+   identity.
+3. **Issuer net cash** — simulate the issuer's own sale and split each tick segment's
+   output by liquidity share: `seg * L_issuer / L_active` is money returning to its own
+   pocket. The remainder is what actually reaches it. Note it did not exit either: the
+   tokens it "sold" are now inside its own position.
+
+`total quote − issuer quote` is **none of these**. It is an inventory statistic — who
+funded the book — and no participant can execute against it. Print it if you like, never
+under a label containing the word "reach".
+
+**And number 2 has one more subtraction in it.** What remains after the issuer withdraws
+is still not third-party depth if whoever created the pool put it there. In the case
+above, $10,000 of a about $10,000 remainder was a single-sided quote position **minted in the
+pool-creation block itself**, untouched for a year. Genuinely unattributed third-party
+quote was **under $100** — more than a hundredfold. Check every surviving position's mint block
+against the pool's creation block. `owned_token_ids()` will not find these for you: it
+enumerates the addresses you already suspected, and this one belonged to an address
+nobody had a reason to name (an EIP-7702 delegated EOA holding exactly one NFT and no
+token balances — see #15 before calling it a contract).
+
+Then ask the question that makes [1] meaningful: **can they execute [2] at will?**
+`ownerOf` the position NFTs. An EOA with no timelock means the counterfactual is one
+transaction away, and the honest sentence is "a seller can reach X today, of which Y% is
+the issuer's and withdrawable in a single call, leaving Z" — all three numbers, one
+sentence.
+
+Symptom you have made this mistake: your "third-party reachable" figure is **smaller than
+the proceeds your own sell simulator reports** for a mid-sized sale. Those come from
+different universes; if the first is below the second, the first is answering a question
+nobody asked.
 
 ## 22. Derived constants must be measured, not recalled
 
@@ -287,6 +343,43 @@ Chain constants drift and reference values go stale. Both failures below shipped
 - **Price**: a cached registry file was quoted as spot. It was five months old and the token
   had fallen 82%. Read price from the pool's `slot0` at a stated block, or stamp the file
   time next to any cached figure.
+
+- **A price read off the tick is not the price.** `slot0` returns both `sqrtPriceX96`
+  and `tick`, and the tick is the *floored* log of the price. `1/1.0001**tick` looks
+  like the price and is not: on one pool it gave a tick-derived price where `sqrtPriceX96` gave
+  **the sqrtPriceX96 price**. That is under a hundredth of a percent and nobody would notice — which is the problem,
+  because the same substitution in a slippage curve or a range-boundary price gets
+  multiplied by `L` and comes out in real dollars. Use `(sqrtPriceX96 / 2**96) ** 2`,
+  adjusted for decimals; use the tick only for bucketing.
+
+- **Contract addresses.** The most expensive recalled constant is not a number, it is an
+  address — a position manager, a factory, a router. A wrong one does not throw:
+  `eth_call` against an address with no code returns `0x`, which decodes to "no
+  positions", "no pool", "no owner". A run wrote PancakeSwap V3's NFPM from memory;
+  `eth_getCode` on it returned **0 bytes** — no contract there at all — and the tool
+  reported the pool as having no NFT positions. Derive it, and prove it:
+
+  | Constant | Derive it from | Prove it |
+  |---|---|---|
+  | Position manager | the `owner` topic of this pool's own `Mint` (or `Burn`) logs | `eth_getCode != "0x"`, and its `factory()` matches the pool's |
+  | Factory | `factory()` (`0xc45a0155`) **on the pool itself** | `getPool(token0,token1,fee)` returns the pool you started from |
+  | Any address a human handed you | nothing — verify it | `eth_getCode != "0x"` before the first call that uses it. Refuse, loudly, on `0x` |
+
+  And when you *write down* an address for someone else to check, write all 20 bytes. A
+  briefing that said "the impostor on Ethereum is `0x82C637cA`" gave every downstream
+  reader a string they could not verify, only believe.
+
+- **Event topics.** Forks change event signatures, so they change topic hashes.
+  PancakeSwap V3's `Swap` carries two extra `uint128` protocol-fee fields, so its topic0
+  is not Uniswap V3's. Filtering a Pancake pool by the Uniswap topic returns `[]`, with
+  no error, and reads as "this pool never traded". Worse, a *mistyped* topic does the
+  same: one run used a `Mint` hash whose first 22 hex characters happened to be correct,
+  got `[]`, and published "no liquidity was added or removed in a million blocks" — the real
+  window held several hundred Mints. Compute topic0 with keccak from the signature string at runtime
+  (`scripts/topics.py` does nothing else), and for any *census* query with **no topic
+  filter** and bucket by `topic0`, so an unrecognised event is a visible unknown rather
+  than an absence. A topic you do filter by must be shown to occur at least once at that
+  address before an empty result from it is allowed to mean anything.
 
 Also: two chains have no common block height. State each chain's block **and timestamp**,
 and report the offset (~2,300 s in the case above) rather than picking a midpoint that
@@ -409,6 +502,121 @@ threads per endpoint. Measure once with a small scan: if doubling workers does n
 roughly halve wall-clock, you are already past the ceiling and everything above it is
 being paid for in retries.
 
+## 28. Netting the pool's Transfer legs is not the buy/sell flow
+
+You have a certified Transfer table, so you compute "net tokens to the market" as
+`sum(value) where dst == pool` minus `sum(value) where frm == pool`. Every row is real,
+the arithmetic is exact, and the answer measures something else. **Four unrelated
+mechanisms move tokens across a pool's boundary and one of them is a trade:**
+
+| Event | token0 | token1 | A trade? |
+|---|---|---|---|
+| `Swap` | signed | signed | **Yes — only this one** |
+| `Mint` | in | in | No. Liquidity added |
+| `Burn` | **nothing** | **nothing** | No. It only credits `tokensOwed` |
+| `Collect` | out | out | No. Principal + fees withdrawn |
+| `Flash`, `CollectProtocol` | out/in | out/in | No |
+
+A fortnight in which JIT makers zap in and out reads, under netting, as enormous selling
+followed by enormous buying. In the case this entry comes from, "13 days, net roughly 29,000
+tokens to market" was computed this way. The real figure from `Swap` alone was
+**roughly 130,000 tokens** — over 4x larger — and the gap was roughly 140,000 tokens of **liquidity being
+added**, counted as the market dumping. The roughly 29,000 was not even wrong as a quantity: it
+is exactly the pool's ERC-20 balance change. It was wrong as a *label*.
+
+**Use `Swap` and only `Swap`.** `amount0`/`amount1` are signed from the pool's side, so
+positives are tokens sold into it and negatives are tokens bought out. Report both
+directions and their counts, never the net alone (#18).
+
+Then run the identity, which is cheap and names the leg you mis-signed:
+
+```
+Δ(pool balance of token0) == Σ swap.amount0 + Σ mint.amount0
+                             − Σ collect.amount0 − Σ collectProtocol.amount0
+```
+
+`Burn` is absent on purpose — including it is the most common way to make this fail.
+It closed to a hundredth of a token on over 100,000 swaps in the case above, and the residual resolved
+to a few dozen transactions where the payer dusted the pool inside the swap callback.
+
+Two attribution traps once you have the swaps:
+
+- **Fold the conduits before ranking anyone.** A batch-settlement router received tokens
+  inside swap transactions and forwarded them in separate ones, so a naive per-tx
+  attribution made it the single largest buyer at **+over 800,000 tokens** while its actual
+  net was roughly zero. Identify pass-throughs (high throughput, `|net| / throughput` near zero,
+  balance near zero) and collapse them iteratively.
+- **`Mint`'s `sender` is whoever called `mint()`, not who paid.** Matching by address
+  lost over 13,000 tokens; match by direction and amount instead.
+
+And the finding that only appears once you do this: **68% of that window's net buying
+came from three "buy then immediately LP" bots whose wallet balances are zero** — the
+tokens sit in the pool as liquidity. Any holder analysis built on balances is blind to
+them.
+
+## 29. A transfer to the pool address is not a sale
+
+The same defect as #28 at address level, and worse there, because what gets published is
+a finding about a person.
+
+A one-hop wallet showed **roughly 1.4 million tokens sent to the pool** and was written up as a
+seller. The receipts: **6 transactions were `Mint`** (roughly 1.37 million tokens added as
+liquidity) and **18 were `Swap`** (under 40,000 actually sold). The real figure was 2.8% of the
+reported one, and the story inverts — that wallet was *providing* the exit liquidity.
+
+**The tell is in the transaction, never in the transfer.** For every `addr → pool`
+transfer, look at what the pool emitted in that same transaction:
+
+- `Swap` → a sale. Its size is `amount0`/`amount1`, **not** the transfer value: routers
+  and multi-hop routes move different amounts through.
+- `Mint` → liquidity added. The `owner` topic says whose position it became — usually
+  the position manager, not the wallet.
+- neither → a donation, a mis-send, or an event you have not decoded. Count it and name
+  it; do not classify it.
+
+Cheap version when receipts are too many: pull the pool's `Swap` and `Mint` logs for the
+window, index by `transactionHash`, and join. Two `eth_getLogs` replace thousands of
+receipt fetches.
+
+The reciprocal error is as common: tokens leaving the pool to an address are a `Collect`
+— its own principal coming back — as often as a purchase. #19's `collectFees` case is
+this mechanism seen from the other side.
+
+## 30. A public router is not a dedicated shell
+
+#20 warns that N-hop-zero-contact does not prove independence. The inverse error is
+just as easy and reads far worse when it is wrong: concluding that because issuer-lineage
+tokens moved through intermediaries before reaching the pool, those intermediaries are a
+purpose-built laundering chain.
+
+A wallet funded by the issuer split a five-figure holding into several hundred slices of
+a few hundred dollars each and pushed them through two addresses into the pool. It was
+written up as a four-hop shell chain "accumulating a six-figure total of sales". Both
+halves were wrong. The cumulative figures quoted were those two addresses' **lifetime**
+totals, spanning more than a year and starting long before the funded wallet existed —
+most of them predated it. And the receipts showed the pair was a **general MEV/arbitrage
+bot**: in earlier transactions they were moving an unrelated token, and moving the
+subject token in the *buy* direction. They were a router someone rented, not a shell
+someone built, and the quote proceeds of every slice went straight back to the funded
+wallet.
+
+The finding survived — an issuer wallet still sliced that holding into retail-sized
+sells — but the mechanism described was fiction.
+
+Before calling an intermediary a shell, check three things:
+
+- **Does it handle other tokens in the same period?** A shell built for this token does
+  not. Pull a receipt from outside your window.
+- **Which direction does it usually move the subject token?** A dedicated distribution
+  conduit does not spend most of its life buying.
+- **Does its lifetime predate the wallet it supposedly serves?** Compare first-seen
+  blocks before quoting any cumulative figure.
+
+Which is the general rule #20's inverse demands: **never describe one episode's flow with
+an intermediary's lifetime totals.** Slice every "routed via X, N tokens" claim to the
+time window and the amounts of the episode you are actually describing. The lifetime
+number is about X, not about your finding.
+
 ## Quick self-checks
 
 | Check | Passes when |
@@ -423,7 +631,15 @@ being paid for in retries.
 | Behaviour classified | First-tx share, buy-time histogram and pool-creation-block position computed — never a net balance |
 | Screened addresses re-verified | Every candidate that passed the filters checked mechanically; `collectFees` ruled out |
 | Independence | 3–5 hops walked with test-transfer detection; no value returning to the issuer |
-| Exit liquidity | LP positions attributed by `ownerOf`; third-party reachable quote reported separately |
+| Exit liquidity | All three numbers computed and separately labelled: spot exit (whole book, untouched), post-withdrawal exit (issuer positions removed, both identities re-asserted), issuer net cash (per-segment attribution). Neither is `total quote − issuer quote` |
+| Position shape | Every issuer position classified ladder / bid / two-sided from its own ticks against the current tick — never carried over from a previous case |
+| Withdrawability | `ownerOf` checked on every issuer position NFT; whether the counterfactual is one transaction away is stated beside the spot-exit number |
+| Venue coverage | Enumeration method stated (factory sweep across every fee tier × quote, V2 `getPair`, plus counterparty mining), and the measured pools' share of discovered quote printed beside every market figure |
+| Window liquidity change | Mint / Burn / Collect / Swap counted over the reporting window with NO topic filter; `Mint == 0 && Burn > 0` treated as a broken query, not a quiet pool; every depth figure carries that window |
+| Pool-leg decomposition | Flow computed from `Swap` amounts only; `Δbalance == Σswap + Σmint − Σcollect − ΣcollectProtocol` closes, with `Burn` excluded |
+| Conduits folded | Pass-through routers collapsed before any buyer/seller ranking; no episode described with an intermediary's lifetime totals |
+| Addresses and topics derived | Every contract address proved with `eth_getCode != "0x"` and written out in full; every topic0 computed by keccak and shown to occur at that address before an empty result from it means anything; price from `sqrtPriceX96`, never from the tick |
+| Certification travels | Any artefact built over a `--force`d database is stamped on the artefact itself, not only in the database's metadata |
 | Constants | Block time and price measured at a stated block, not recalled or read from cache |
 | Privileges | Every contract that holds or moves the token audited — adapter, vesting factory, distributor — not just the token; each live path named with its holder and threshold |
 | Cross-chain labels | No address tagged as issuer on one chain and untagged on another |

@@ -192,12 +192,39 @@ def check_coverage(c, at_block=None):
 
 # ---------------------------------------------------------------- the rebuild
 
+def taint(db):
+    """Every reason this database may not be trusted, read back OUT of meta.
+
+    `--force` does not certify a database, it makes it usable. That difference has to
+    travel with every number derived from it. It did not: one run forced past the
+    coverage gate, stamped `coverage_incomplete=1`, and produced a deliverable that was
+    byte-indistinguishable from one built on a clean replay — the stamp sat in a table
+    nothing downstream ever read.
+    """
+    c = sqlite3.connect(db)
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                     ).fetchone():
+        return ["no meta table: this database carries no provenance at all"]
+    kv = dict(c.execute("SELECT k, v FROM meta"))
+    out = []
+    if str(kv.get("coverage_incomplete")) == "1":
+        out.append(f"COVERAGE GATE OVERRIDDEN with --force at "
+                   f"{kv.get('coverage_forced_at', '?')} — block ranges nobody answered "
+                   f"are inside every figure derived from this database")
+    if int(kv.get("negative_balances") or 0) > 0:
+        out.append(f"{kv['negative_balances']} NEGATIVE BALANCES persisted — funding "
+                   f"transfers are missing")
+    return out
+
+
 def rebuild(db, at_block=None, force=False, progress=200_000):
     """Replay `transfers` into exact integer balances. Returns {addr: Holder}.
 
     Every wei stays in Python int. CAST(val AS REAL) loses precision above 2**53, which
     a token crosses at ~9 tokens, and the loss is invisible to four significant figures.
     """
+    for t in taint(db):
+        print(f"  !! UNCERTIFIED DATA — {t}")
     c = sqlite3.connect(db)
     try:
         check_coverage(c, at_block)
