@@ -24,7 +24,7 @@ and any that fails is dropped with a printed note, never silently. Factories are
 LEARNED: every pool found by mining is asked for its `factory()`, and a new one is swept
 too. That is how a fork nobody listed gets covered.
 """
-import argparse, collections, json, sys
+import argparse, collections, json, re, sys
 from rpc import Client, BASE, BSC, ETH, LOG_EPS, MAX_SPAN, RangeError
 from scan import STABLES
 import topics as TP
@@ -84,7 +84,13 @@ def sym(cli, tok):
 
 def verify_factory(cli, fac, kind, token, quotes):
     """A factory is usable only if getPool round-trips to a pool that points back."""
-    if has_code(cli, fac) is not True:
+    hc = has_code(cli, fac)
+    if hc is None:
+        # None is a REFUSAL, not an answer. Reporting it as "no code" retires a factory
+        # that may well exist, and every pool only it could have found disappears from
+        # the coverage basis without leaving a trace.
+        return False, "NOT ANSWERED — could not read its code, so this factory was NOT swept"
+    if not hc:
         return False, "no code at that address"
     probes = [(q, f) for q in quotes for f in (FEE_TIERS if kind == "v3" else [None])]
     for q, fee in probes:
@@ -169,6 +175,21 @@ def main():
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
 
+    # Validate every address the caller typed BEFORE it becomes calldata. A non-address
+    # here does not error: it is zero-padded into a 32-byte word and the call comes back
+    # empty, which reads as "that pool does not exist". The runbook itself once carried
+    # `--quote auto`, which is not an address.
+    def _addr_or_die(v, what):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", v):
+            sys.exit(f"{what} {v!r} is not a 20-byte address. It would be padded into "
+                     f"calldata and answered with an empty result, which reads as "
+                     f"'not found' rather than as your typo.")
+        return v.lower()
+    a.token = _addr_or_die(a.token, "--token")
+    a.quote = [_addr_or_die(q, "--quote") for q in a.quote]
+    for f in a.factory:
+        _addr_or_die(f.partition(":")[0], "--factory")
+
     cli, gcli = Client(NETS[a.chain]), Client(LOG_EPS[a.chain])
     prices = {}
     for kv in a.quote_price:
@@ -240,12 +261,15 @@ def main():
 
     # ---- inventory ----------------------------------------------------------
     print(f"\n  {len(pools)} pool(s) total. Reading inventory…\n")
-    rows = []
+    rows, unread_pools = [], []
     for pa, meta in pools.items():
         try:
             t0 = meta["t0"] or _addr(cli.eth_call(pa, SEL["token0"])).lower()
             t1 = meta["t1"] or _addr(cli.eth_call(pa, SEL["token1"])).lower()
-        except Exception:
+        except Exception as e:
+            # Dropping this pool silently would compute the coverage share over a subset
+            # nobody can see, which is the one thing this tool exists not to do.
+            unread_pools.append((pa, f"token0/token1 not read: {str(e)[:60]}"))
             continue
         quote = t0 if t1 == token else t1
         try:
@@ -253,7 +277,8 @@ def main():
             td = int(cli.eth_call(token, SEL["decimals"]), 16)
             qb = int(cli.eth_call(quote, BALANCE_OF + pa[2:].rjust(64, "0")), 16) / 10 ** qd
             tb = int(cli.eth_call(token, BALANCE_OF + pa[2:].rjust(64, "0")), 16) / 10 ** td
-        except Exception:
+        except Exception as e:
+            unread_pools.append((pa, f"balances not read: {str(e)[:60]}"))
             continue
         qsym = stables.get(quote) or sym(cli, quote)
         # A quote asset is worth its face value only if we KNOW what it is worth.
@@ -285,6 +310,13 @@ def main():
         top = priced[0]["share_pct"]
     print(f"\n  VENUE COVERAGE: {len(priced)} priced pool(s) hold ${tot_q:,.2f} of quote; "
           f"the largest is {top:.3f}% of it.")
+    if unread_pools:
+        print(f"  !! {len(unread_pools)} pool(s) were DISCOVERED but could not be read, "
+              f"so they are in neither the basis nor the table above:")
+        for pa, why in unread_pools:
+            print(f"       {pa}  {why}")
+        print(f"     A share computed over the pools that happened to answer is not "
+              f"coverage. Re-run before quoting the percentage.")
     if unpriced:
         print(f"  !! {len(unpriced)} pool(s) are quoted in an asset with no price and are "
               f"NOT in that basis:")
@@ -307,9 +339,12 @@ def main():
         print("\n" + json.dumps({"token": token, "head": head, "pools": rows,
                                  "priced_quote_usd": tot_q, "top_share_pct": top,
                                  "unpriced_pools": len(unpriced),
+                                 "unread_pools": [{"pool": p_, "why": w_}
+                                                  for p_, w_ in unread_pools],
                                  "mining_refused": ref}, indent=1, default=str))
     # Unpriced pools are an unknown, and an unknown is not a pass.
-    sys.exit(0 if (top >= a.min_share and not ref and not unpriced) else 2)
+    sys.exit(0 if (top >= a.min_share and not ref and not unpriced
+                   and not unread_pools) else 2)
 
 
 if __name__ == "__main__":

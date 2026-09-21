@@ -64,6 +64,12 @@ printed. A run with refusals produced floors, not facts.
 ```bash
 cd scripts
 
+# Before anything: does the skill still agree with itself? One second, no network.
+# Re-derives every constant, resolves every command in this runbook, checks the
+# pitfall numbering everything cites by number. A wrong topic or a documented flag
+# that does not exist fails HERE instead of coming back as an empty result.
+python selftest.py
+
 # L0  Replay, then certify. Two gates, and they are not the same gate.
 python replay.py --rpc bsc --token 0xTOKEN --from-block <deploy> --db t.db --workers 4
 python replay.py --db t.db --verify --rpc bsc          # exit 0 = CERTIFIED
@@ -76,7 +82,8 @@ python replay.py --db t.db --verify --rpc bsc          # exit 0 = CERTIFIED
 # token, never just the token — the escrow nobody opens is where a sweep() lives.
 python privileges.py --chain bsc 0xTOKEN 0xADAPTER 0xVESTING 0xDISTRIBUTOR
 
-# L7  Market, early. Thin depth makes the percentage academic.
+# Market, early and cheap. Thin depth makes the percentage academic. Its depth figure
+# is SPOT EXIT only (exit number 1 of 3); L7a-d below are the real market layer.
 python scan.py --chain bsc --token 0xTOKEN --also-audit 0xADAPTER --holdings <n>
 
 # L1/L2  Fix the DENOMINATOR before attributing anything. Exclusions are what is not
@@ -97,9 +104,11 @@ python control.py bridge --home eth:0xTOKEN:0xADAPTER --remote bsc:0xTOKEN monad
 # L7a  Enumerate the VENUES before measuring any of them. One pool is not a market.
 #      Factory sweep finds pools with no recent trades; counterparty mining finds
 #      factories you did not list. Neither alone is coverage.
-python venues.py --chain bsc --token 0xTOKEN --quote auto
-#   Every pool with its quote inventory and its SHARE of the total. Exit 2 when the
-#   pools you go on to measure hold under 99% of the quote discovered.
+python venues.py --chain bsc --token 0xTOKEN --quote-price WBNB=<usd>
+#   Stables and wrapped native are swept without being asked for; --quote 0xADDR adds
+#   one. Quotes with no USD price are EXCLUDED from the share basis and listed — a pool
+#   holding 70M units of a microcap once ranked first at 99.5% by face value.
+#   Exit 2 on: share below the threshold, any refusal, any unpriced or unread pool.
 
 # L7b  Did the book change during the window you are about to describe? Census with NO
 #      topic filter and bucket by topic0 — a fork's Swap topic is not Uniswap's, and a
@@ -188,7 +197,7 @@ Compute the float twice, independently:
 
 They must agree. A residual is acceptable only when you can name it (cross-chain in flight, a stuck transfer). An unexplained gap means an address is mis-tagged — find it before publishing.
 
-## The Number That Matters Most
+## The Numbers That Matter Most
 
 Paper market cap is not exit liquidity. Build the V3 liquidity profile and simulate the sell:
 

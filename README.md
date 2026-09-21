@@ -85,6 +85,8 @@ tracing-token-float/
     pitfalls.md             30 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
+    selftest.py             checks the skill against itself — derived constants, runbook
+                            commands, pitfall numbering, README counts. No network.
     scan.py                 the three-number pass — start here (its depth figure is
                             SPOT EXIT only; see positions.py for the other two)
     privileges.py           selector extraction from bytecode + live-control proof

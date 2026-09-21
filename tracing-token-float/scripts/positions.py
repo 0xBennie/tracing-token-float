@@ -3,19 +3,30 @@
 
     python positions.py --chain base --pool 0xPOOL... --issuer 0xLP... 0xTREASURY...
 
-A pool's ERC-20 balance is not the issuer's LP position, and the quote sitting in a
-pool is not what a seller can reach. Both mistakes are in this skill's pitfalls file
-and neither had a tool:
+A pool's ERC-20 balance is not the issuer's LP position (pitfall #4: third-party LPs
+and JIT liquidity get attributed to the issuer). But knowing WHOSE the liquidity is
+does not, by itself, tell you what anyone can sell into — and the first version of this
+file said it did. It printed `pool quote - issuer quote` under the label "a third party
+can reach", which is an inventory statistic no participant can execute against.
 
-  #4  third-party LPs and JIT liquidity get attributed to the issuer
-  #21 in one audit 99.3% of the main pool's quote token sat in the ISSUER'S OWN
-      positions, priced 45-82% below spot. The issuer selling into its own bid moves
-      money between its own pockets — net cash zero. The number that matters to
-      anyone else is THIRD-PARTY reachable quote.
+There are THREE exit numbers and this tool prints all of them (pitfall #21):
 
-The same pass separates liquidity from a sell ladder. A position whose range sits
-entirely above spot holds only the token: that is a row of limit orders, not depth.
-In that audit 98% of the issuer's LP was parked at 1.8-9x spot.
+  [1] SPOT EXIT   the whole book, untouched. What a holder selling right now receives.
+                  Ownership never enters it: an AMM pays from whatever is at the tick.
+  [2] POST-WITHDRAWAL EXIT   the counterfactual where the issuer pulls its positions
+                  first. Real, and often brutal — but it is a counterfactual, and it is
+                  meaningless unless you also say whether they CAN (ownerOf, locks).
+  [3] ISSUER NET CASH   what actually reaches the issuer when it sells into its own bid.
+
+Reporting [2] as [1] understated a live, crossing, two-sided issuer bid by 35x, in the
+reassuring direction, and a sale a fifth of the size of the published "ceiling" paid
+more than the whole ceiling out of the real book.
+
+The same pass separates liquidity from a sell ladder, and that decides whether the
+subtraction means anything at all. A position whose range sits entirely on the far side
+of spot holds only the subject token: limit orders, contributing zero quote, so removing
+it changes nothing. A position straddling spot holds real quote below the price and is,
+to a seller, indistinguishable from a stranger's bid.
 
 No NonfungiblePositionManager address is hardcoded. The NFPM is discovered from the
 pool's own Mint events — it is the owner that appears there and answers
@@ -152,6 +163,15 @@ def owned_token_ids(cli, nfpm, owner, cap=2000):
                 except Exception:
                     res.append(None)
         ids += [int(r, 16) for r in res if r]
+    # balanceOf said n. Anything less than n here is an NFT whose id nobody would
+    # answer for, and dropping it silently UNDERSTATES the issuer's liquidity — the
+    # direction that makes an audit look reassuring. Say so; never return a short list
+    # as if it were the whole holding.
+    if len(ids) < n:
+        raise RuntimeError(
+            f"{owner} holds {n} position NFT(s) but only {len(ids)} id(s) could be read "
+            f"({n - len(ids)} unanswered). Every figure derived from this would understate "
+            f"the issuer. Re-run rather than publish a floor as a total.")
     return ids
 
 
@@ -167,11 +187,20 @@ def creation_block(cli, addr, lo, hi):
         try:
             return (cli.call("eth_getCode", [addr, hex(b)]) or "0x") != "0x"
         except Exception:
+            # None is "nobody answered", NOT "no code here". A bisect that treats it as
+            # False walks into the wrong half and returns a creation block that is
+            # confidently wrong — and this anchor is what pitfall #18 compares first
+            # buys against.
             return None
     if has_code(lo):
         return lo
     if not has_code(hi):
-        raise RuntimeError(f"{addr} has no code at #{hi} — wrong address or chain")
+        # has_code(hi) is None means nobody answered, which is not the same claim as
+        # "there is no contract there" — do not let a rate limit read as a wrong address.
+        raise RuntimeError(
+            f"{addr}: could not establish code at #{hi}. Either there is no contract "
+            f"there (wrong address or chain) or no endpoint would answer — check the "
+            f"RPC census before concluding the former")
     while lo + 1 < hi:
         mid = (lo + hi) // 2
         r = has_code(mid)
@@ -483,8 +512,10 @@ def main():
     p.add_argument("--chain", required=True, choices=list(NETS))
     p.add_argument("--pool", required=True)
     p.add_argument("--issuer", nargs="+", required=True,
-                   help="the issuer's addresses. Their positions are enumerated and "
-                        "subtracted from the book to give third-party reachable quote")
+                   help="the issuer's addresses. Their positions are enumerated, "
+                        "classified by shape, and removed from the book to build the "
+                        "POST-WITHDRAWAL counterfactual — which is not what a third "
+                        "party can sell into today. See pitfall #21")
     p.add_argument("--nfpm", help="position manager, if discovery cannot find it")
     p.add_argument("--token", help="the SUBJECT token (the one being audited). Without "
                         "it the quote side is inferred from the stable registry, and if "
