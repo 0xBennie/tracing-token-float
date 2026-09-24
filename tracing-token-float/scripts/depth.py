@@ -10,8 +10,21 @@ Works on Uniswap V3, PancakeSwap V3, Aerodrome Slipstream and similar forks.
 
 Answers "if they dumped, what would they actually get?" — not "what is it worth at
 mark price". In thin markets those differ by orders of magnitude.
+
+Singleton-pool AMMs — Pancake Infinity CL and Uniswap V4 — keep every pool inside one
+manager contract, keyed by a 32-byte poolId, with no per-pool ERC-20 balance:
+
+    from depth import InfinityPool, V4Pool
+    p = InfinityPool(Client(BSC), "0xCLPoolManager...", "0xPOOL_ID...", 18, 18)
+    q = V4Pool(Client(BSC), "0xPoolManager...", (c0, c1, fee, tickSpacing, hooks), 18, 18)
+
+Same identities, same simulator. See SingletonPool for what the reserve check can and
+cannot say there.
 """
+import math
+from Crypto.Hash import keccak as _k
 from rpc import s256
+from topics import selector
 
 MIN_TICK, MAX_TICK = -887272, 887272
 
@@ -110,16 +123,27 @@ class Pool:
         hi = (MAX_TICK // self.ts) >> 8 if up is None else ((self.tick + up) // self.ts) >> 8
         wps = list(range(lo, hi + 1))
         words = dict(zip(wps, (int(r, 16) for r in self.c.batch(
-            [("eth_call", [{"to": self.a, "data": SEL["bitmap"] + f"{_u256(w):064x}"}, b])
-             for w in wps]))))
+            [self._bitmap_call(w, b) for w in wps]))))
         ticks = sorted(((w << 8) + i) * self.ts
                        for w, v in words.items() if v for i in range(256) if v >> i & 1)
-        raw = self.c.batch([("eth_call", [{"to": self.a,
-                            "data": SEL["ticks"] + f"{_u256(t):064x}"}, b]) for t in ticks])
+        raw = self.c.batch([self._tick_call(t, b) for t in ticks])
+        self.net = {t: self._tick_net(r) for t, r in zip(ticks, raw)}
+        self.ticks = ticks
+
+    # The three reads _scan makes, separated so a pool that is not its own contract
+    # (SingletonPool below) can swap the transport and keep every identity and the
+    # simulator unchanged.
+    def _bitmap_call(self, w, b):
+        return ("eth_call", [{"to": self.a, "data": SEL["bitmap"] + f"{_u256(w):064x}"}, b])
+
+    def _tick_call(self, t, b):
+        return ("eth_call", [{"to": self.a, "data": SEL["ticks"] + f"{_u256(t):064x}"}, b])
+
+    @staticmethod
+    def _tick_net(r):
         # word1 is int128, but ABI encoding sign-extends it into the full 256-bit word.
         # Decoding it as 128-bit turns every negative liquidityNet into ~1e38.
-        self.net = {t: s256(int(r[2:][64:128], 16)) for t, r in zip(ticks, raw)}
-        self.ticks = ticks
+        return s256(int(r[2:][64:128], 16))
 
     @property
     def price(self):
@@ -354,13 +378,228 @@ class Pool:
         return [f(s) for s in sizes]
 
 
+# ---------------------------------------------------------------- singleton pools
+def _keccak(b):
+    h = _k.new(digest_bits=256)
+    h.update(b)
+    return h.digest()
+
+
+def _w(x):
+    """One 32-byte ABI word, two's complement for negatives."""
+    return _u256(x).to_bytes(32, "big")
+
+
+def _swap_fee(protocol_fee, lp_fee):
+    """Total swap fee in pips from slot0's two fields, the way both singletons charge it.
+
+    protocolFee packs two 12-bit directional fees (low = zeroForOne, high = oneForZero)
+    and is applied on top of the LP fee: p + lp - p*lp/1e6. The simulator takes one fee
+    for both directions, so this uses the LARGER of the two — a seller is never told
+    they get more than they would."""
+    p = max(protocol_fee & 0xFFF, protocol_fee >> 12 & 0xFFF)
+    return p + lp_fee - p * lp_fee // 1_000_000
+
+
+class SingletonPool(Pool):
+    """A concentrated-liquidity pool that lives inside a singleton manager.
+
+    The book is the same V3 book and every structural identity still holds, so the
+    whole Pool machinery applies. Two things do not carry over, and both matter:
+
+      - There is no per-pool token balance. The manager's vault holds every pool's
+        tokens together, so `reserve0/1` here are the VAULT's balances: an upper bound,
+        not this pool's reserves. The band check keeps its value as a decode check
+        (a model above the vault's whole balance is a bug) and loses it as a reserve
+        check; err%/residual are against the vault and mean nothing. The two
+        structural identities are the real gate.
+      - A wrong poolId or manager does not error. Every read returns zeros, and an
+        empty book satisfies both identities vacuously — a pool that does not exist
+        passes selfcheck. So each subclass proves the key hashes to the poolId, and
+        slot0 must be non-zero with a tick that agrees with its own sqrtPrice.
+
+    A non-zero `hooks` address is printed, never ignored: a hook can take a fee or
+    reroute a swap entirely, and then the book is not what a seller receives.
+    """
+
+    def __init__(self, client, manager, pool_id, dec0, dec1, **kw):
+        self.pid = pool_id.lower()
+        self.hooks = None
+        super().__init__(client, manager.lower(), dec0, dec1, **kw)
+
+    def _read(self, b, dec0, dec1, down, up, batch):
+        self._load_key(b)                               # token0/1, ts, hooks; proves pid
+        sqrt_x96, self.tick, self.protocol_fee, self.lp_fee = self._slot0(b)
+        if sqrt_x96 == 0:
+            raise InconsistentState(
+                f"pool {self.pid} on {self.a}: slot0 is zero — not initialised, or the "
+                f"manager is wrong. Every other read would be zeros too and pass the "
+                f"identities vacuously.")
+        self.sqrtP = sqrt_x96 / 2 ** 96
+        want = math.floor(math.log(self.sqrtP ** 2) / math.log(1.0001))
+        if abs(want - self.tick) > 1:
+            raise InconsistentState(
+                f"pool {self.pid}: slot0 tick {self.tick} disagrees with its own sqrtPrice "
+                f"(implies {want}) — slot0 was decoded from the wrong word or slot")
+        self.fee = _swap_fee(self.protocol_fee, self.lp_fee)
+        self.L0 = self._liquidity(b)
+        vault = self._vault(b)
+        self.reserve0 = self._held(self.token0, vault, dec0, b)
+        self.reserve1 = self._held(self.token1, vault, dec1, b)
+        self.pfee0 = self.pfee1 = None
+        self._scan(down, up, batch, b)
+
+    def _held(self, token, vault, dec, b):
+        if int(token, 16) == 0:                       # native currency, not an ERC-20
+            return int(self.c.call("eth_getBalance", [vault, b]), 16) / 10 ** dec
+        return self.c.erc20_balance(token, vault, dec, b)
+
+    def selfcheck(self):
+        d = super().selfcheck()
+        d["reserve_scope"] = "vault (every pool) — upper bound only"
+        d["hooks"] = self.hooks
+        return d
+
+
+class InfinityPool(SingletonPool):
+    """Pancake Infinity CL: CLPoolManager exposes per-poolId getters directly."""
+
+    SIG = dict(slot0="getSlot0(bytes32)", liquidity="getLiquidity(bytes32)",
+               key="poolIdToPoolKey(bytes32)", vault="vault()",
+               bitmap="getPoolBitmapInfo(bytes32,int16)", tick="getPoolTickInfo(bytes32,int24)")
+
+    def _call(self, name, b, *words):
+        data = selector(self.SIG[name]) + self.pid[2:].rjust(64, "0") + "".join(
+            w.hex() for w in words)
+        return self.c.eth_call(self.a, data, b)
+
+    def _load_key(self, b):
+        # PoolKey = (currency0, currency1, hooks, poolManager, fee, parameters), and the
+        # poolId IS keccak(abi.encode(key)). Checking that proves both the id and the
+        # manager at once: a wrong manager returns a zero key, which hashes to neither.
+        k = self._call("key", b)[2:]
+        if len(k) < 384 or "0x" + _keccak(bytes.fromhex(k[:384])).hex() != self.pid:
+            raise InconsistentState(
+                f"poolIdToPoolKey({self.pid}) on {self.a} does not hash back to the poolId "
+                f"— wrong poolId, or this is not its CLPoolManager")
+        wd = [k[i:i + 64] for i in range(0, 384, 64)]
+        self.token0, self.token1 = "0x" + wd[0][24:], "0x" + wd[1][24:]
+        self.hooks = "0x" + wd[2][24:]
+        if int(self.hooks, 16) == 0:
+            self.hooks = None
+        if ("0x" + wd[3][24:]).lower() != self.a:
+            raise InconsistentState(f"pool {self.pid}: its key names manager 0x{wd[3][24:]}, "
+                                    f"not {self.a}")
+        ts = int(wd[5], 16) >> 16 & 0xFFFFFF                 # CL parameters bits 16..39
+        self.ts = ts - (1 << 24) if ts >= 1 << 23 else ts
+
+    def _slot0(self, b):
+        r = self._call("slot0", b)[2:]
+        return (int(r[:64], 16), s256(int(r[64:128], 16)),
+                int(r[128:192], 16), int(r[192:256], 16))
+
+    def _liquidity(self, b):
+        return int(self._call("liquidity", b), 16)
+
+    def _vault(self, b):
+        return "0x" + self.c.eth_call(self.a, selector(self.SIG["vault"]), b)[-40:]
+
+    def _bitmap_call(self, w, b):
+        return ("eth_call", [{"to": self.a, "data": selector(self.SIG["bitmap"])
+                              + self.pid[2:] + f"{_u256(w):064x}"}, b])
+
+    def _tick_call(self, t, b):
+        return ("eth_call", [{"to": self.a, "data": selector(self.SIG["tick"])
+                              + self.pid[2:] + f"{_u256(t):064x}"}, b])
+    # Tick.Info is (liquidityGross, liquidityNet, ...): the V3 word layout, so the
+    # inherited _tick_net applies unchanged.
+
+
+class V4Pool(SingletonPool):
+    """Uniswap V4: the PoolManager has no per-pool getters, only `extsload(slot)`.
+
+    State is read from storage directly, at the slots v4-core's StateLibrary derives:
+    pools mapping at slot 6; within a pool's state, liquidity at +3, the ticks mapping
+    at +4 and the tick bitmap at +5; mapping keys are int256-padded. Those numbers are
+    recalled from the library, NOT derived here — which is exactly why _read refuses a
+    zero slot0 and a slot0 whose tick disagrees with its sqrtPrice. A wrong base slot
+    fails that loudly instead of reading an empty book.
+
+    The manager also stores no PoolKey, so it cannot be looked up from the poolId.
+    Pass the key — (currency0, currency1, fee, tickSpacing, hooks) — from the pool's
+    Initialize event, a position manager's poolKeys(), or the vault that deployed into
+    it; the poolId is derived from it as keccak(abi.encode(key)), and checked against
+    `pool_id` when you pass that too.
+    """
+
+    POOLS_SLOT, LIQUIDITY_OFFSET, TICKS_OFFSET, BITMAP_OFFSET = 6, 3, 4, 5
+
+    def __init__(self, client, manager, key, dec0, dec1, pool_id=None, **kw):
+        c0, c1, fee, ts, hooks = key
+        self._key = (c0.lower(), c1.lower(), int(fee), int(ts), hooks.lower())
+        pid = "0x" + _keccak(b"".join((_w(int(c0, 16)), _w(int(c1, 16)), _w(int(fee)),
+                                       _w(int(ts)), _w(int(hooks, 16))))).hex()
+        if pool_id and pool_id.lower() != pid:
+            raise InconsistentState(f"key hashes to {pid}, not to the pool_id {pool_id} — "
+                                    f"one of the five key fields is wrong")
+        super().__init__(client, manager, pid, dec0, dec1, **kw)
+
+    def _load_key(self, b):
+        self.token0, self.token1, _, self.ts, hooks = self._key
+        self.hooks = hooks if int(hooks, 16) else None
+        self._state = int.from_bytes(_keccak(bytes.fromhex(self.pid[2:])
+                                             + _w(self.POOLS_SLOT)), "big")
+
+    def _sload(self, slot, b):
+        return int(self.c.eth_call(self.a, selector("extsload(bytes32)")
+                                   + f"{slot:064x}", b), 16)
+
+    def _mapping(self, key, offset):
+        return int.from_bytes(_keccak(_w(key) + _w(self._state + offset)), "big")
+
+    def _slot0(self, b):
+        v = self._sload(self._state, b)
+        tick = v >> 160 & 0xFFFFFF
+        return (v & ((1 << 160) - 1), tick - (1 << 24) if tick >= 1 << 23 else tick,
+                v >> 184 & 0xFFFFFF, v >> 208 & 0xFFFFFF)
+
+    def _liquidity(self, b):
+        return self._sload(self._state + self.LIQUIDITY_OFFSET, b) & ((1 << 128) - 1)
+
+    def _vault(self, b):
+        return self.a                                # the PoolManager holds the tokens
+
+    def _bitmap_call(self, w, b):
+        return ("eth_call", [{"to": self.a, "data": selector("extsload(bytes32)")
+                              + f"{self._mapping(w, self.BITMAP_OFFSET):064x}"}, b])
+
+    def _tick_call(self, t, b):
+        return ("eth_call", [{"to": self.a, "data": selector("extsload(bytes32)")
+                              + f"{self._mapping(t, self.TICKS_OFFSET):064x}"}, b])
+
+    @staticmethod
+    def _tick_net(r):
+        # One packed word: liquidityGross in the low 128 bits, liquidityNet (int128) in
+        # the high 128 — NOT the ABI layout of V3's ticks(), which puts net in word 1.
+        v = int(r, 16) >> 128
+        return v - (1 << 128) if v >= 1 << 127 else v
+
+
 if __name__ == "__main__":
     import argparse, json
     from rpc import Client, BASE, BSC, ETH
     NETS = {"base": BASE, "bsc": BSC, "eth": ETH}
     p = argparse.ArgumentParser(description="V3 liquidity profile + sell simulator")
     p.add_argument("--chain", required=True, choices=list(NETS))
-    p.add_argument("--pool", required=True)
+    where = p.add_mutually_exclusive_group(required=True)
+    where.add_argument("--pool", help="a V3-family pool contract")
+    where.add_argument("--pool-id", help="a singleton pool's 32-byte poolId (Pancake "
+                                          "Infinity CL, or Uniswap V4 with --v4-key)")
+    p.add_argument("--manager", help="with --pool-id: the CLPoolManager / PoolManager that "
+                                     "holds it. The poolId is proved against it, never assumed")
+    p.add_argument("--v4-key", metavar="C0,C1,FEE,TICKSPACING,HOOKS",
+                   help="with --pool-id: this is a Uniswap V4 pool, and here is its PoolKey "
+                        "(V4 stores none on-chain). Must hash to --pool-id")
     p.add_argument("--dec0", type=int, required=True, help="token0 decimals — read it, never guess")
     p.add_argument("--dec1", type=int, required=True, help="token1 decimals")
     p.add_argument("--sell", type=float, nargs="*", default=[10_000, 100_000, 1_000_000])
@@ -369,7 +608,17 @@ if __name__ == "__main__":
     p.add_argument("--block", help="hex block to pin to (needs an archive node)")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
-    pool = Pool(Client(NETS[a.chain]), a.pool.lower(), a.dec0, a.dec1, block=a.block)
+    cli = Client(NETS[a.chain])
+    if a.pool:
+        pool = Pool(cli, a.pool.lower(), a.dec0, a.dec1, block=a.block)
+    elif not a.manager:
+        p.error("--pool-id needs --manager: a singleton pool is only defined inside one")
+    elif a.v4_key:
+        c0, c1, fee, ts, hooks = (x.strip() for x in a.v4_key.split(","))
+        pool = V4Pool(cli, a.manager, (c0, c1, int(fee), int(ts), hooks), a.dec0, a.dec1,
+                      pool_id=a.pool_id, block=a.block)
+    else:
+        pool = InfinityPool(cli, a.manager, a.pool_id, a.dec0, a.dec1, block=a.block)
     sell = pool.sell1 if a.token1 else pool.sell
     px = pool.price1 if a.token1 else pool.price
     res = [sell(s) for s in a.sell]
@@ -377,11 +626,17 @@ if __name__ == "__main__":
         print(json.dumps({"check": pool.check, "price": px, "sells": res}, indent=1, default=str))
     else:
         ck = pool.check
-        print(f"{a.pool}  price {px:,.8g}  ticks {ck['ticks']}  fee {pool.fee/1e4:.2f}%")
+        print(f"{a.pool or a.pool_id}  price {px:,.8g}  ticks {ck['ticks']}  fee {pool.fee/1e4:.4g}%")
         print(f"  self-check ok={ck['ok']}  sum(liquidityNet)==0: {ck['id_sum_zero']}  "
               f"below-price==liquidity(): {ck['id_active_liquidity']}")
         print(f"  model/chain  token0 {ck['model0']:,.6g}/{ck['chain0']:,.6g} ({ck['err0_pct']:+.2f}%)"
               f"   token1 {ck['model1']:,.6g}/{ck['chain1']:,.6g} ({ck['err1_pct']:+.2f}%)")
+        if ck.get("reserve_scope"):
+            print(f"  ! 'chain' is the {ck['reserve_scope']}: the % above is NOT a reserve "
+                  f"check here — the two identities are the gate")
+        if ck.get("hooks"):
+            print(f"  ! hooks {ck['hooks']}: a hook can take a fee or reroute a swap, so the "
+                  f"book is not a promise of what a seller receives — read the hook")
         for r in res:
             print(f"  sell {r['requested']:>14,.0f}  filled {r['filled']:>14,.0f}  "
                   f"proceeds {r['proceeds']:>14,.2f}  avg {r['avg']:>12.6g}  "

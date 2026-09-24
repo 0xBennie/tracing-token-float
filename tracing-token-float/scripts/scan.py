@@ -226,6 +226,15 @@ def main():
                 print(f"  {'':16s} -> owner is a Safe {s['threshold']}/{len(s['owners'])}: "
                       f"{s['threshold']} signatures move it")
                 out["privileges"][-1]["owner_safe"] = s
+        # Whoever else got past a gate — primaryOwner(), admin(), ... — is control too.
+        held = {v: k for f in r["privileged"] for k, v in f.get("callable_by", {}).items()
+                if v != r.get("owner")}
+        for holder, label in held.items():
+            s = safe_control(c, holder)
+            if s["is_safe"]:
+                print(f"  {'':16s} -> {label} {holder} is a Safe "
+                      f"{s['threshold']}/{len(s['owners'])}: {s['threshold']} signatures move it")
+                out["privileges"][-1].setdefault("holder_safes", {})[holder] = s
         print()
 
     # A clean token contract is the expected result and means very little on its own.

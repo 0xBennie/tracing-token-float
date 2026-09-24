@@ -2,7 +2,8 @@
 
 How to turn a Uniswap-V3-style pool into an answer to "if they dumped, what would they actually get?"
 
-Applies to Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, and other forks. Selectors below are the standard ones; forks occasionally extend the `ticks` struct but keep `liquidityGross`/`liquidityNet` as the first two words.
+Applies to Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, and other forks — and, with
+the differences set out under "Singleton pools" below, to Pancake Infinity CL and Uniswap V4. Selectors below are the standard ones; forks occasionally extend the `ticks` struct but keep `liquidityGross`/`liquidityNet` as the first two words.
 
 ## Selectors
 
@@ -197,6 +198,47 @@ else:
 Note the two sign flips that are easy to miss: the tick crossing **adds** `liquidityNet` going up (it subtracts going down), and the output accumulator uses the reciprocal form. Getting one right and the other wrong produces a curve that looks plausible and is wrong by the width of the range.
 
 The stopping conditions swap accordingly: cumulative output cannot exceed the pool's **token0** balance, and above the highest initialized tick there are no asks left.
+
+## Singleton pools: Pancake Infinity and Uniswap V4
+
+Both keep every pool inside one manager contract, keyed by a 32-byte `poolId`. The book
+is the same V3 book — bitmap words, `liquidityNet` per tick, the two identities — so
+`depth.py` reads it with `InfinityPool` / `V4Pool` and runs the same self-check and
+simulator. What differs is where the state is and what the reserve check can still say.
+
+| | Pancake Infinity CL | Uniswap V4 |
+|---|---|---|
+| Reads | `CLPoolManager.getSlot0(id)`, `getLiquidity(id)`, `getPoolBitmapInfo(id,int16)`, `getPoolTickInfo(id,int24)` | only `PoolManager.extsload(slot)`: pools mapping at slot 6, liquidity at +3, ticks at +4, bitmap at +5 |
+| PoolKey | `poolIdToPoolKey(id)` — `(c0, c1, hooks, manager, fee, parameters)`, tickSpacing in `parameters` bits 16–39 | **not stored**. Take it from the `Initialize` event, a position manager's `poolKeys()`, or the vault that deployed into the pool |
+| Tokens held by | `manager.vault()` | the PoolManager itself |
+| Tick word | ABI tuple, `liquidityNet` in word 1 (as V3) | one packed slot: gross low 128 bits, **net high 128 bits** |
+
+```bash
+python depth.py --chain bsc --pool-id 0xPOOL_ID --manager 0xCL_POOL_MANAGER --dec0 18 --dec1 18
+python depth.py --chain bsc --pool-id 0xPOOL_ID --manager 0xPOOL_MANAGER --dec0 18 --dec1 18 \
+       --v4-key 0xC0,0xC1,<fee>,<tickSpacing>,0xHOOKS
+```
+
+Three things to know before trusting a number from one:
+
+- **A wrong id or manager does not error.** Every read comes back zero, and an empty book
+  satisfies both identities vacuously — a pool that does not exist passes the self-check.
+  So the id is proved, not trusted: `keccak(abi.encode(key)) == poolId` (the Infinity key
+  also names its own manager), slot0 must be non-zero, and slot0's tick must agree with
+  its own `sqrtPriceX96`. That last check is also what validates V4's recalled slot
+  numbers at runtime: read from the wrong base slot, slot0 is zero or inconsistent.
+- **There is no per-pool balance.** The vault holds every pool's tokens, typically tens to
+  thousands of times one pool's book. The balance is an upper bound, so the band check
+  still catches a decode bug that produces an absurd model, but the model/balance error
+  means nothing. The two structural identities are the whole gate.
+- **Hooks.** A non-zero `hooks` address can charge its own fee, override the LP fee per
+  swap, or return a delta that reroutes the trade. The book then says what the curve
+  would pay, not what the hook lets a seller receive. It is printed; read the hook.
+
+The swap fee is `p + lp − p·lp/1e6`, where `lp` is slot0's LP fee and `p` is the protocol
+fee for the direction of the trade (two 12-bit fields packed into slot0's `protocolFee`).
+The simulator charges one fee for both directions, so it uses the larger `p`. Check it
+once against a `Swap` event's own `fee` field: they should be equal.
 
 ## Reporting
 

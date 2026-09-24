@@ -161,6 +161,29 @@ payloads* instead: a stranger gets `OwnableUnauthorizedAccount` (`0x118cdaa7`) o
 nothing. Different failures prove the gate exists and that the owner is past it. Always
 run a garbage selector as a control, or a fallback-everything contract reads as a hit.
 
+**PUSH4 is not the dispatch table.** solc pushes a constant in the fewest bytes that hold
+it, so a selector beginning `0x00` is a `PUSH3` and one beginning `0x0000` a `PUSH2`. A
+scan that collects PUSH4 immediates never sees those functions. A real case: a private LP
+vault's `withdraw(uint256,address)` is `0x00f714ce`; the audit reported "no withdraw" while
+the owner could pull the vault's entire bid in one call. Collecting every short push is
+no fix — PUSH2 is mostly jump targets — so read the short values only where they sit in
+dispatcher shape (`DUP1 PUSHn x EQ PUSH2 dst JUMPI`, `PUSHn x DUP2 EQ …`, or the last
+entry with no `DUP1`), in a run anchored by a PUSH4 entry or by the `PUSH1 0xe0 SHR` that
+extracted the selector. The anchor is what rejects an ordinary `if (x == 0)`, which has
+the same five opcodes.
+
+**`owner()` is a convention, not the gate.** Probe every dangerous selector from every
+authority-shaped getter the contract answers — `primaryOwner()`, `admin()`, `guardian()`,
+and so on — not just from `owner()`. A real case: an upgradeable token vault holding a
+large locked allocation had no `owner()` at all; its full-balance `emergencyWithdraw` was
+gated on a custom `primaryOwner()`, a 4/6 Safe. The audit printed `owner=None`, which reads
+as "nobody controls this", over the biggest escape hatch in the case. Two related traps
+in the same pass: a proxy audit that matched its dangerous list against the proxy's own
+stub *before* merging the implementation's selectors (every UUPS proxy read as bare
+"upgradeable"), and an auth-error table typed from memory whose `NotOwner()` entry was
+the wrong hash. When the stranger is refused and no candidate gets through, the answer
+is "gated, holder unknown" — never "unowned".
+
 ## 15. `getCode != "0x"` misclassifies EIP-7702 accounts
 
 A delegated EOA carries code — `0xef0100` followed by a 20-byte implementation address —
@@ -450,6 +473,14 @@ Related: never skip `raise_for_status()`. A 429 or 503 carrying a JSON body pars
 normal reply, so the run ends blaming the data instead of the rate limit — and a
 `{"result": null}` handed back to a caller expecting a list crashes somewhere unrelated.
 
+Three more collisions, all in the same matcher. Infura's range cap reads `range 19999
+exceeds limit of 10000` — no "the", no "block range" — and matched no range sign at all,
+so the window was retried whole until it failed. A bare `429` rate sign matched *inside
+a block count* (`range 14290 …`) and vetoed the range signal. And revert reasons are free
+text: `execution reverted: amount exceeds limit of wallet` must be read as the chain
+answering, so reverts are classified before range signs. Test the classifier on a table
+of real messages, not on the one you just saw.
+
 ## 25. SQL string-slicing a wei amount silently truncates it
 
 Token amounts do not fit in SQLite's INTEGER. The habit that grows out of that is to
@@ -616,6 +647,30 @@ Which is the general rule #20's inverse demands: **never describe one episode's 
 an intermediary's lifetime totals.** Slice every "routed via X, N tokens" claim to the
 time window and the amounts of the episode you are actually describing. The lifetime
 number is about X, not about your finding.
+
+## 31. `sed -i` on a log a running process is writing detaches the writer
+
+`sed -i` does not edit in place. GNU and BSD sed both write a new file and rename it over
+the old path, so the path now names a **new inode**. The running process still holds a
+descriptor to the old one — now unlinked — and keeps writing there. Nothing errors. The
+log simply stops growing, `tail -f` shows a process that looks hung, and everything it
+writes from then on — progress, `FAILED` windows, the final census — is gone when it
+exits. The disk space is not even freed until then.
+
+It happens for a good reason, which is why it happens: an endpoint URL with an API key in
+its path lands in error text, the key lands in a replay log, and the obvious fix is to
+`sed -i` it out while the replay is still running. That redacted the file and silently
+cut the log off from the run it was logging.
+
+- Redact at the source. `rpc.py` masks `/v1/<key>`, `/v2/<key>`, `/v3/<key>` path
+  segments and `apikey=` parameters before any error text leaves it.
+- To clean a log that is still being written: wait for the writer to exit, or write a
+  redacted **copy** (`sed 's/…/***/' run.log > run.clean.log`) and leave the original.
+- `ls -i run.log` before and after shows the swap; `lsof +L1` lists files a process
+  still writes that no longer have a name.
+- The log was never the record. `replay.py` records coverage in `ranges_done`, in the
+  database, so `--verify` still sees every window a detached log failed to report. A
+  coverage figure comes from `--verify`, never from grepping a log.
 
 ## Quick self-checks
 

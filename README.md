@@ -82,14 +82,15 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             30 traps that corrupt results while every number still looks fine
+    pitfalls.md             31 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
     selftest.py             checks the skill against itself — derived constants, runbook
                             commands, pitfall numbering, README counts. No network.
     scan.py                 the three-number pass — start here (its depth figure is
                             SPOT EXIT only; see positions.py for the other two)
-    privileges.py           selector extraction from bytecode + live-control proof
+    privileges.py           selector extraction from bytecode + live-control proof,
+                            naming whichever getter holds each gate
     rpc.py                  rotating JSON-RPC; separate endpoint pools for historical logs
     replay.py               parallel event replay into SQLite + the coverage and supply gates
     balances.py             exact rebuild, and the float denominator that closes in wei
@@ -99,7 +100,8 @@ tracing-token-float/
     attribute.py            the tier table, the closure gate, and the re-audit diff
     lineage.py              weighted provenance, net-flow, first-funder
     depth.py                V3 profile, structural identities, sell simulator (both directions),
-                            and excluding() for the post-withdrawal counterfactual
+                            excluding() for the post-withdrawal counterfactual, and the
+                            Pancake Infinity / Uniswap V4 singleton-pool readers
     topics.py               event topics computed from signatures, never stored as hashes;
                             unfiltered census and the Mint==0-while-Burn>0 check
     poolflow.py             window event census, Swap-only flow, and the closing identity
@@ -117,6 +119,11 @@ cp -r tracing-token-float/tracing-token-float ~/.claude/skills/
 ```
 
 Codex, Copilot CLI and Gemini CLI also read `~/.agents/skills/`.
+
+`tests/` sits beside the skill, not inside it, and is not installed with it: a live
+regression against real bytecode (needs a BSC node) and stubbed-node tests of the
+privilege probes. `python -m pytest tests`. `scripts/selftest.py` stays offline and
+covers the dispatcher, error-class and redaction regressions on synthetic inputs.
 
 ### On the examples
 

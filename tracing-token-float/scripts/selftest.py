@@ -17,6 +17,12 @@ Every check here exists because the corresponding mistake actually shipped:
     had grown three files. Counts are recomputed.
   - pitfalls.md is referenced by number from the code and the prose. A renumber breaks
     every one of those references silently, so the numbering is checked for gaps.
+  - The selector scan read PUSH4 only, so a function whose selector starts 0x00 (solc
+    pushes it with PUSH3) was invisible — a full-balance withdraw read as absent. The
+    dispatcher shapes are checked on synthetic bytecode, both ways.
+  - An Infura range cap ("range 19999 exceeds limit of 10000") matched no range sign,
+    and a bare "429" matched inside a block number. Error classes are checked on a
+    table of real messages, and the redaction of API keys in error text with them.
 
 What it deliberately does NOT do: touch the network. A self-test that needs an archive
 node is a self-test nobody runs.
@@ -83,6 +89,85 @@ def check_constants():
                 fail("constants", f"privileges.{attr} != keccak('{label}') - 1")
     except Exception as e:
         note(f"privileges.py slots not checked ({e})")
+
+    # The DANGEROUS table is typed, and its comment says every entry was computed. Make
+    # that true on every run: a wrong selector reads as "this contract has no mint".
+    try:
+        import privileges as PV
+        for sel, (sig, _) in PV.DANGEROUS.items():
+            if TP.selector(sig) != sel:
+                fail("constants", f"privileges.DANGEROUS[{sel}] is not selector({sig}) "
+                                  f"= {TP.selector(sig)}")
+    except Exception as e:
+        note(f"privileges.DANGEROUS not checked ({e})")
+
+
+# ---------------------------------------------------------------- behaviour
+def check_dispatch():
+    """selectors() must find short-pushed selectors in dispatcher shape, and nothing else."""
+    try:
+        import privileges as PV
+    except Exception as e:
+        return fail("dispatch", f"privileges.py will not import: {e}")
+    # CALLDATALOAD PUSH1 e0 SHR, then: DUP1 PUSH3 f714ce EQ PUSH2 15ed JUMPI (the 0x00
+    # selector), DUP1 PUSH4 0dfe1681 EQ PUSH2 159d JUMPI, PUSH4 e2bbb158 EQ PUSH2 00fc
+    # JUMPI (last entry, no DUP1), PUSH0 DUP1 REVERT.
+    table = ("3560e01c" "8062f714ce146115ed57" "80630dfe1681146115" "9d57"
+             "63e2bbb1581461" "00fc57" "5f80fd")
+    got = PV.selectors("0x" + table)
+    for want in ("0x00f714ce", "0x0dfe1681", "0xe2bbb158"):
+        if want not in got:
+            fail("dispatch", f"selectors() missed {want} in a synthetic dispatch table")
+    for jump in ("0x000015ed", "0x0000159d", "0x000000fc"):
+        if jump in got:
+            fail("dispatch", f"selectors() reported the PUSH2 jump target {jump} as a selector")
+    # A short LAST entry (no DUP1) after a PUSH4 entry is still the table.
+    tail = "3560e01c" "80630dfe16811461159d57" "62abcdef146100fc57"
+    if "0x00abcdef" not in PV.selectors("0x" + tail):
+        fail("dispatch", "selectors() missed a PUSH3 selector in the last dispatch slot")
+    # Ordinary `if (x == 0)` / `if (x == 2)` has the same five-opcode shape. Unanchored,
+    # it is not a dispatch table.
+    code = "600081146101235780600214610456575b"
+    if PV.selectors("0x" + code):
+        fail("dispatch", f"selectors() read ordinary comparisons as selectors: "
+                         f"{sorted(PV.selectors('0x' + code))}")
+    if "0xdeadbeef" not in PV.selectors("0x63deadbeef50"):
+        fail("dispatch", "selectors() stopped collecting every PUSH4")
+
+
+def check_error_classes():
+    """rpc.classify on real node messages — range, rate and revert must not collide."""
+    try:
+        import rpc
+    except Exception as e:
+        return fail("errors", f"rpc.py will not import: {e}")
+    table = [
+        ("range 19999 exceeds limit of 10000", "range"),                 # infura
+        ("range 14290 exceeds limit of 10000", "range"),                 # contains 429
+        ({"code": -32005, "message": "query returned more than 10000 results"}, "range"),
+        ("exceed maximum block range: 50000", "range"),                  # nodereal
+        ("logs count exceeds the limit 50000", "range"),                 # nodereal
+        ("You have reached the maximum API usage limit of public key", "rate"),
+        ("limit exceeded", "rate"),                                      # dataseeds
+        ("daily request count exceeded, request rate limited", "rate"),
+        ("Your app has exceeded its compute units per second capacity", "rate"),
+        ("429 Too Many Requests", "rate"),
+        ("request exceeds limit of 25 requests per second", "rate"),
+        ("execution reverted: transfer amount exceeds limit of wallet", "revert"),
+        ("method not found", "dead"),
+    ]
+    for msg, want in table:
+        got = rpc.classify(msg)
+        if got != want:
+            fail("errors", f"classify({str(msg)[:50]!r}) = {got}, want {want}")
+    key = "0123456789abcdef0123456789abcdef"
+    for url in (f"https://bsc-mainnet.infura.io/v3/{key}",
+                f"https://bsc-mainnet.nodereal.io/v1/{key}",
+                f"https://rpc.example.org/?apikey={key}&x=1"):
+        if key in rpc.redact(f"rpc failed :: {url}: 429 for url: {url}"):
+            fail("errors", f"redact() left an API key in {url.split('/')[2]} error text")
+    if rpc.redact("https://bsc-dataseed.bnbchain.org") != "https://bsc-dataseed.bnbchain.org":
+        fail("errors", "redact() mangled a URL that carries no key")
 
 
 # ---------------------------------------------------------------- runbook
@@ -216,6 +301,8 @@ def check_syntax():
 def main():
     check_syntax()
     check_constants()
+    check_dispatch()
+    check_error_classes()
     check_runbook()
     n = check_pitfalls()
     check_readme(n or 0)

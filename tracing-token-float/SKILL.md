@@ -38,9 +38,12 @@ to the full method below — either answer can make the rest academic.
 adapters, vesting factories, distributors, staking pools. The token itself is the
 contract everyone reads and therefore the least likely place to find anything; the
 escrow nobody thinks to open is where a `sweep()` lives. `scripts/privileges.py`
-extracts every selector the runtime bytecode dispatches and flags the ones granting
-unilateral control — then proves each one live by showing a stranger refused with an
-auth error where the owner is not.
+extracts every selector the runtime bytecode dispatches — including the ones solc pushes
+in fewer than four bytes — and flags the ones granting unilateral control. Then it proves
+each one live by showing a stranger refused with an auth error where an authority is not,
+and names that authority: `owner()` where there is one, otherwise whichever getter
+(`primaryOwner()`, `admin()`, `guardian()`, …) holds the gate. `owner=None` never means
+unowned.
 
 If a mint path exists outside the bridge logic, "who controls the float" is the wrong
 question — they can print. This also decides whether `totalSupply()` is an invariant the
@@ -77,6 +80,11 @@ python replay.py --db t.db --verify --rpc bsc          # exit 0 = CERTIFIED
 #             it fetches only what ranges_done does not already cover.
 #   exit 3 -> it REFUSED to certify (no bounds recorded, or no --rpc). Not a pass.
 # Nothing below this line means anything until this exits 0.
+#   Long history: split it into segments, one --db each, run side by side. A segment
+#   that starts before the first Transfer is refused (its first window is truthfully
+#   empty); qualify it on a window that holds the token's EARLIEST Transfer instead:
+python replay.py --rpc bsc --token 0xTOKEN --from-block <lo> --to-block <hi> --db seg1.db \
+       --qualify-window <mint_lo>:<mint_hi>
 
 # Privileges, before any percentage. Audit every contract that HOLDS or MOVES the
 # token, never just the token — the escrow nobody opens is where a sweep() lives.
@@ -124,6 +132,9 @@ python positions.py --chain bsc --pool 0xPOOL --token 0xTOKEN --issuer 0xLP 0xTR
 #   run refuses when the stable registry is ambiguous. Prints all three exit numbers:
 #   spot (whole book), post-withdrawal (counterfactual), and who can withdraw what.
 #   Quoting any one of them as "the" exit liquidity is pitfall #21.
+#   Pancake Infinity / Uniswap V4 pools live inside one manager, keyed by poolId — no
+#   per-pool balance, so the identities are the only gate (references/v3-depth.md):
+python depth.py --chain bsc --pool-id 0xPOOL_ID --manager 0xMANAGER --dec0 18 --dec1 18
 
 # L2/L8  The tier table, and the gate that makes it publishable.
 python attribute.py --tiers audit.json --out run1.json
@@ -253,7 +264,7 @@ summed across every venue L7a enumerated** — and say how many venues that was.
 
 For concentrated-liquidity math and the depth simulator: [references/v3-depth.md](references/v3-depth.md).
 
-Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/balances.py](scripts/balances.py) (exact rebuild + the float denominator), [scripts/control.py](scripts/control.py) (Safe signer intersection, effective lock period, cross-chain supply), [scripts/positions.py](scripts/positions.py) (V3 liquidity attributed to its real owners), [scripts/attribute.py](scripts/attribute.py) (the tier table and the closure gate), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check).
+Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/balances.py](scripts/balances.py) (exact rebuild + the float denominator), [scripts/control.py](scripts/control.py) (Safe signer intersection, effective lock period, cross-chain supply), [scripts/positions.py](scripts/positions.py) (V3 liquidity attributed to its real owners), [scripts/attribute.py](scripts/attribute.py) (the tier table and the closure gate), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check; also Pancake Infinity and Uniswap V4 singleton pools).
 
 ## Common Mistakes
 

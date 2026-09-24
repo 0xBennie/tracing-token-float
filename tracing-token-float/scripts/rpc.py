@@ -8,7 +8,7 @@ call, retry with backoff, and keep batches at or below ~120 items.
     c.eth_call(token, "0x18160ddd")                       # totalSupply
     c.batch([("eth_call", [{"to": p, "data": d}, "latest"]) for d in datas])
 """
-import atexit, collections, itertools, sys, time, requests
+import atexit, collections, itertools, re, sys, time, requests
 
 # Two pools, because they are two different capabilities. Most public nodes serve
 # eth_call at `latest` happily and are PRUNED for historical eth_getLogs — and a
@@ -102,12 +102,64 @@ RANGE_SIGNS = ("block range", "range is too", "exceed maximum block", "more than
                # nodereal: "logs count exceeds the limit 50000" — a RESULT cap, not a
                # block-range cap, and it matched nothing in this tuple before. Note it is
                # "exceeds the limit", NOT nodereal's throttle text "limit exceeded" below.
-               "exceeds the limit", "count exceeds")
+               "exceeds the limit", "count exceeds",
+               # Infura: "query returned more than 10000 results" is covered above, but
+               # its block-range cap reads "range 19999 exceeds limit of 10000" — no
+               # "the", no "block range" — and matched nothing, so an over-wide window
+               # was retried as-is until it failed instead of being split.
+               "exceeds limit of")
 RATE_SIGNS = ("rate limit", "too many request", "429", "capacity", "throttl",
               "quota", "limit exceeded", "over rate",
               # nodereal throttles with "You have reached the maximum API usage limit of
               # public key ..." — contains the word "limit" but is a BACKOFF, not a split.
-              "usage limit", "reached the maximum api")
+              "usage limit", "reached the maximum api",
+              # A throttle phrased as a count per unit time ("exceeds limit of 25 requests
+              # per second") would otherwise read as the Infura range cap above.
+              "per second", "per minute", "requests per")
+
+
+def _has(msg, signs):
+    """Substring match — except that an all-digit sign must stand alone. A bare "429"
+    matched inside "range 14290 exceeds limit of 10000" and vetoed the range signal,
+    so a window that needed splitting was backed off and retried at the same size."""
+    return any(re.search(rf"(?<!\d){k}(?!\d)", msg) if k.isdigit() else k in msg
+               for k in signs)
+
+
+def classify(msg):
+    """What an error message asks of the caller: "dead" (never ask this endpoint this
+    again), "range" (split the window), "rate" (wait, retry the SAME window), "revert"
+    (the chain answered — stop), or None (unknown: rotate and retry).
+
+    Order is the contract. A revert is checked BEFORE the range signs: revert reasons
+    are free text, and "execution reverted: amount exceeds limit of wallet" or "...
+    more than balance" would otherwise be split as if the node had refused a range.
+    And rate VETOES range: a message carrying both is a throttle, because splitting a
+    throttled window multiplies the throttling (pitfall #24)."""
+    m = str(msg).lower()
+    if _has(m, DEAD_FOR_LOGS):
+        return "dead"
+    if _has(m, REVERT_SIGNS):
+        return "revert"
+    rate = _has(m, RATE_SIGNS)
+    if _has(m, RANGE_SIGNS) and not rate:
+        return "range"
+    if rate:
+        return "rate"
+    return None
+
+
+# An API key in a URL path is a credential. Endpoint URLs end up in exception text,
+# exception text ends up in logs, and one replay wrote a paid key into every
+# `replay*.log` it produced. /v1/<key> (nodereal), /v2/<key> (alchemy), /v3/<key>
+# (infura), and the usual query-string spellings.
+_KEY_PATH = re.compile(r"(/v\d+/)([A-Za-z0-9_-]{16,})")
+_KEY_QUERY = re.compile(r"((?:api[_-]?key|apikey|key|token)=)[^&\s'\"]+", re.I)
+
+
+def redact(text):
+    """`text` with API-key path segments and key query parameters masked."""
+    return _KEY_QUERY.sub(r"\1***", _KEY_PATH.sub(r"\1***", str(text)))
 
 
 
@@ -233,23 +285,22 @@ class Client:
                 resp.raise_for_status()
                 j = resp.json()
                 if "error" in j:
-                    msg = str(j["error"]).lower()
+                    kind = classify(j["error"])
                     last = f"{url}: {j['error']}"
-                    if any(k in msg for k in DEAD_FOR_LOGS):
+                    if kind == "dead":
                         self._dead.add(url)      # never ask this one again
                         continue
-                    if any(k in msg for k in RANGE_SIGNS) and \
-                       not any(k in msg for k in RATE_SIGNS):
+                    if kind == "range":
                         # One node's range cap is not every node's. Rotate first and only
                         # declare the window too large if EVERY endpoint says so —
                         # otherwise a single stingy node makes the caller split a window
                         # that the next endpoint would have served whole.
                         rng += 1
                         continue
-                    if any(k in msg for k in RATE_SIGNS):
+                    if kind == "rate":
                         time.sleep(1.5 * (i + 1))     # back off, do NOT split the window
                         continue
-                    if any(k in msg for k in REVERT_SIGNS):
+                    if kind == "revert":
                         # The chain answered. Every other endpoint will answer the same,
                         # so stop here instead of burning the rotation on it.
                         CENSUS.answered[method] += 1
@@ -270,11 +321,13 @@ class Client:
             except Exception as e:
                 last = f"{url}: {e}"
             time.sleep(0.35 * (i + 1))
+        # redact(): `last` carries the endpoint URL and whatever the transport said,
+        # and requests puts the full URL — key included — into its own messages too.
         if rng and rng >= min(tries, len(self.endpoints)):
             CENSUS.refused[method] += 1
-            raise RangeError(f"every endpoint refused the range :: {last}")
+            raise RangeError(redact(f"every endpoint refused the range :: {last}"))
         CENSUS.refused[method] += 1
-        raise RuntimeError(f"rpc failed [{method}] :: {last}")
+        raise RuntimeError(redact(f"rpc failed [{method}] :: {last}"))
 
     def _answered(self, method, result):
         CENSUS.answered[method] += 1
@@ -320,7 +373,8 @@ class Client:
         try:
             return [self.call(m, p) for m, p in reqs]
         except Exception as e:
-            raise RuntimeError(f"batch failed :: {last} ; serial fallback also failed :: {e}")
+            raise RuntimeError(redact(f"batch failed :: {last} ; serial fallback also "
+                                      f"failed :: {e}"))
 
     def eth_call(self, to, data, block="latest"):
         return self.call("eth_call", [{"to": to, "data": data}, block])

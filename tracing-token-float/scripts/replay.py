@@ -4,6 +4,10 @@
     python replay.py --rpc bsc --token 0xABC... --from-block 112756423 --db t.db --workers 4
     python replay.py --db t.db --verify
 
+    # a segment that starts before the first Transfer, run in parallel with others:
+    python replay.py --rpc bsc --token 0xABC... --from-block 95000000 --to-block 99999999 \
+           --db seg1.db --qualify-window 112756423:112776422
+
 Two gates, and they are not the same gate:
 
   COVERAGE — did a node actually answer for every block in the range? This is
@@ -107,6 +111,15 @@ def qualify(cli, token, probe_lo, probe_hi):
     A pruned node answers a range it cannot serve with an empty result and no error.
     From the response alone that is indistinguishable from a quiet range, so the
     question has to be settled out of band: query a window known to contain logs.
+
+    By default that window is the scan's own first one, which is right for a scan
+    that starts at the deploy block and wrong for a SEGMENT: a segment that begins
+    before TGE has a first window that is legitimately empty, and was refused, so a
+    long replay could not be split and run in parallel. `--qualify-window` names the
+    known-dense window instead. Choose the token's EARLIEST Transfer (the mint) where
+    you can: a node with an archive floor serves everything above the floor, so a
+    window at or below the segment proves the segment is servable, while one above it
+    proves nothing about the blocks in between.
     """
     got = cli.call("eth_getLogs", [{"address": token, "topics": [TRANSFER],
                                     "fromBlock": hex(probe_lo), "toBlock": hex(probe_hi)}])
@@ -321,6 +334,11 @@ if __name__ == "__main__":
                         "public BSC endpoint into returning nothing (default 4)")
     p.add_argument("--span", type=int, default=None,
                    help="block window size; defaults to the measured cap for the chain")
+    p.add_argument("--qualify-window", metavar="LO:HI",
+                   help="qualify the endpoint pool on this block window instead of the "
+                        "scan's own first one — REQUIRED for a segment that starts before "
+                        "the token's first Transfer. Pick a window known to hold this "
+                        "token's logs, ideally its earliest (the mint)")
     p.add_argument("--verify", action="store_true")
     a = p.parse_args()
 
@@ -329,13 +347,39 @@ if __name__ == "__main__":
     if a.from_block is not None:
         tok = a.token.lower()
         hi = a.to_block if a.to_block is not None else cli.block_number()
-        n = qualify(cli, tok, a.from_block, min(a.from_block + span - 1, hi))
+        if a.qualify_window:
+            try:
+                qlo, qhi = (int(x.replace("_", "")) for x in a.qualify_window.split(":"))
+            except ValueError:
+                sys.exit(f"--qualify-window wants LO:HI block numbers, got {a.qualify_window!r}")
+            if not 0 <= qlo <= qhi:
+                sys.exit(f"--qualify-window #{qlo}–#{qhi} is empty or reversed")
+            if qhi - qlo + 1 > span:
+                sys.exit(f"--qualify-window spans {qhi - qlo + 1:,} blocks, wider than the "
+                         f"{span:,}-block window this pool serves. Narrow it: a range refusal "
+                         f"here would say nothing about whether the pool holds history.")
+            where = f"the qualify window #{qlo:,}–#{qhi:,}"
+        else:
+            qlo, qhi = a.from_block, min(a.from_block + span - 1, hi)
+            where = f"the token's own first window (#{a.from_block:,}–)"
+        try:
+            n = qualify(cli, tok, qlo, qhi)
+        except RangeError as e:
+            sys.exit(f"REFUSED: every endpoint refused {where} as too large ({e}).")
         if n == 0:
-            sys.exit(f"REFUSED: the endpoint pool returned no logs for the token's own "
-                     f"first window (#{a.from_block}–). Either the from-block is wrong or "
-                     f"every endpoint is pruned. Starting now would record empty answers "
-                     f"as covered history.")
-        print(f"endpoint pool qualified: {n} logs in the first window", flush=True)
+            sys.exit(f"REFUSED: the endpoint pool returned no logs for {where}. Either that "
+                     f"window really holds none of this token's Transfers (a segment that "
+                     f"starts before TGE: pass --qualify-window on one that does), or every "
+                     f"endpoint is pruned. Starting now would record empty answers as "
+                     f"covered history.")
+        print(f"endpoint pool qualified: {n} logs in {where}", flush=True)
+        if a.qualify_window and qlo > a.from_block:
+            # Not refused: a pre-TGE segment has no earlier window with logs to offer.
+            print(f"  ! qualified ABOVE this segment (#{qlo:,} > #{a.from_block:,}). An archive "
+                  f"floor between the two would still answer this segment with [] and no "
+                  f"error. Fine if that window holds the token's EARLIEST Transfer — then "
+                  f"everything below it is empty anyway; otherwise qualify lower.",
+                  file=sys.stderr, flush=True)
         scan(cli, a.db, tok, a.from_block, hi, span, a.workers)
     if a.verify:
         sys.exit(verify(a.db, cli))
