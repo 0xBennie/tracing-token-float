@@ -26,7 +26,7 @@ positioned after distribution completes produces no negative balances either.
 The failure mode gets quieter as the token matures, i.e. quietest exactly when
 the analysis matters most.
 
-126 of 1383 ranges once failed this way on a BSC replay: no error, no crash, 620
+About one range in eleven once failed this way on a BSC replay: no error, no crash, 620
 negative balances, rebuilt supply 2.82M tokens too high, and every downstream
 percentage wrong. The endpoints were pruned and answered historical queries with
 `{"result": []}` — byte-identical to a genuinely empty range.

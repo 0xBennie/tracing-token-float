@@ -290,6 +290,42 @@ def check_retracted_wording():
                                               f"retired label: {h[:70]}")
 
 
+# ---------------------------------------------------------------- redaction
+# Protocol and chain constants: precise, and identify nothing.
+_CONSTANTS = {"1.0001", "887272", "6932", "0.4502", "0.4500", "2.0000", "12.04", "12.06",
+              "7702", "19999", "14290", "10000"}   # EIP number; quoted RPC error text
+
+
+def check_exact_figures():
+    """Prose must not carry figures precise enough to find the audit they came from.
+
+    This repo rounds every case figure ("roughly 360,000", not "356,478"): the ratio and
+    the mechanism carry the lesson, the decimals only carry attribution — one block
+    explorer search turns 125,571 or 15,419 BNB back into a project name. The rule was
+    broken twice, both times by a commit that otherwise passed this self-test. A number
+    with four or more significant digits outside code is flagged unless it is a known
+    protocol constant.
+    """
+    num = re.compile(r"(?<![\w.#x$])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{4,}(?:\.\d+)?|\d+\.\d{3,})(?![\w])")
+    for p in [ROOT / "SKILL.md"] + sorted((ROOT / "references").glob("*.md")):
+        fenced = False
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            prose = re.sub(r"`[^`]*`", "", line)
+            for m in num.findall(prose):
+                digits = m.replace(",", "").replace(".", "").strip("0")
+                if m.replace(",", "") in _CONSTANTS or len(digits) < 4:
+                    continue
+                if re.fullmatch(r"(19|20)\d\d", m):        # a year
+                    continue
+                fail("redaction", f"{p.name}:{i} carries {m} — round it (\"roughly …\") or "
+                                  f"add it to _CONSTANTS if it is a protocol constant")
+
+
 def check_syntax():
     for p in sorted(SCRIPTS.glob("*.py")):
         try:
@@ -307,6 +343,7 @@ def main():
     n = check_pitfalls()
     check_readme(n or 0)
     check_retracted_wording()
+    check_exact_figures()
 
     for m in NOTE:
         print(f"  note: {m}")

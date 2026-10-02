@@ -66,7 +66,7 @@ Evidence classes that work: bidirectional repeated transfers, ≥5 repeated one-
 
 ## 8. Sybil detection without a null hypothesis is noise
 
-"2,728 duplicate amounts" means nothing alone. State the null model (amounts independent across claimers), compute the expected collision count under it, and report the ratio. Several orders of magnitude above expectation is a finding; 2× is not.
+"Roughly 2,700 duplicate amounts" means nothing alone. State the null model (amounts independent across claimers), compute the expected collision count under it, and report the ratio. Several orders of magnitude above expectation is a finding; 2× is not.
 
 Corroborate with a second, independent signal — e.g. claim-sequence spacing far tighter than independent arrival would produce.
 
@@ -426,7 +426,7 @@ The gate everyone trusts cannot see the failure that actually happens.
 
 A pruned node does not error on a historical `eth_getLogs` it cannot serve. It returns
 `{"result": []}` — byte-identical to a genuinely quiet range. The scanner records the
-window as covered and moves on. 126 of 1383 ranges went this way on one BSC replay: no
+window as covered and moves on. About one range in eleven went this way on one BSC replay: no
 error, no crash, 620 negative balances, rebuilt supply 2.82M tokens high, every
 percentage wrong.
 

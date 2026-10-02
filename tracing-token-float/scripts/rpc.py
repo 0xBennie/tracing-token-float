@@ -13,7 +13,7 @@ import atexit, collections, itertools, re, sys, time, requests
 # Two pools, because they are two different capabilities. Most public nodes serve
 # eth_call at `latest` happily and are PRUNED for historical eth_getLogs — and a
 # pruned node does not error, it answers `{"result": []}`. Mixing the pools is how
-# 126 of 1383 ranges went missing on a BSC replay with no error and no crash.
+# About one range in eleven went missing on a BSC replay with no error and no crash.
 #
 # These lists are a starting point, NOT a guarantee: replay.py qualifies whatever
 # pool it is handed against a window known to contain logs and refuses to start if
