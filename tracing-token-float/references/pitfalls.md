@@ -274,6 +274,16 @@ routinely defeated by pass-through shells. The signature to look for instead:
 Walk 3–5 hops with test-transfer detection before concluding independence, and treat
 "funded before the pool existed" as near-decisive on its own.
 
+**Both signals misfire on an exchange deposit.** A test transfer before the real one is
+exactly what anyone does when the far end is *not* theirs — a fresh CEX deposit address
+— and a deposit made before a DEX pool opens is ordinary. One audit read a Safe's
+"10.00 then the rest" into a deposit address, ahead of the pool, as a market-making
+shell the issuer controlled; the address was the exchange's, topped up with gas by the
+same funder that serviced ordinary users' deposit addresses. Before either signal counts,
+check the recipient for the custody markers in SKILL.md's L3 row. And state which "pool
+creation" you mean: the pool's initialisation block and its first token inflow were
+over a hundred thousand blocks apart there, and the same transfer was "before" one and "after" the other.
+
 ## 21. "Exit liquidity" is three numbers, and subtracting the issuer's LP answers only two of them
 
 You attribute the pool's quote by `ownerOf`, subtract the issuer's share, and publish the
@@ -549,13 +559,35 @@ mechanisms move tokens across a pool's boundary and one of them is a trade:**
 | `Flash`, `CollectProtocol` | out/in | out/in | No |
 
 A fortnight in which JIT makers zap in and out reads, under netting, as enormous selling
-followed by enormous buying. In the case this entry comes from, "13 days, net roughly 29,000
-tokens to market" was computed this way. The real figure from `Swap` alone was
-**roughly 130,000 tokens** — over 4x larger — and the gap was roughly 140,000 tokens of **liquidity being
-added**, counted as the market dumping. The roughly 29,000 was not even wrong as a quantity: it
-is exactly the pool's ERC-20 balance change. It was wrong as a *label*.
+followed by enormous buying. So you move to `Swap` — and that is where this entry's first
+version went wrong too, in the opposite direction.
 
-**Use `Swap` and only `Swap`.** `amount0`/`amount1` are signed from the pool's side, so
+**`Swap` is the right event, and a Swap-only net is still not "holder net buying".** A
+"buy then immediately LP" bot buys inside a transaction and mints the tokens straight
+back as a one-tick range; other people's buys then fill that range and turn it into
+quote, which the bot burns and collects. Its own `Swap` is a buy. The fill is someone
+else's buy. The bot ends every round at zero inventory, and the Swap-only net counted it
+as a buyer anyway. In the case this entry comes from:
+
+| Number | Value | What it is |
+|---|---|---|
+| Pool ERC-20 balance change | roughly 29,000 out | a stock change, not a flow |
+| Swap-only net | **roughly 130,000 bought** | gross of LP round trips |
+| Swap net excluding round-trip transactions | **roughly 29,000 bought** | what holders actually took |
+
+The first version of this entry called the second number "the real figure, over 4x the
+first", and the deliverable published it. A dozen-odd bot addresses had done hundreds of round trips
+and ended flat; the third line is the answer, and it happens to sit near the first only
+because the bots' mints and fills nearly cancelled. Do not rely on that coincidence.
+
+**Classify transactions, not events.** A transaction in which the pool emits a `Swap`
+together with a `Mint`, or with a `Burn`/`Collect`, is liquidity management whatever its
+swap leg says — including the leg where a bot collects an unfilled range and sells it
+back in the same transaction (a few dozen in the case above; missing them flips the
+holder net to a negative number). Report the Swap legs of those transactions separately
+and leave them out of holder flow. `poolflow.py` prints all three lines.
+
+**Use `Swap` and only `Swap` for trades.** `amount0`/`amount1` are signed from the pool's side, so
 positives are tokens sold into it and negatives are tokens bought out. Report both
 directions and their counts, never the net alone (#18).
 
@@ -574,16 +606,15 @@ Two attribution traps once you have the swaps:
 
 - **Fold the conduits before ranking anyone.** A batch-settlement router received tokens
   inside swap transactions and forwarded them in separate ones, so a naive per-tx
-  attribution made it the single largest buyer at **+over 800,000 tokens** while its actual
+  attribution made it the single largest buyer at **over +800,000 tokens** while its actual
   net was roughly zero. Identify pass-throughs (high throughput, `|net| / throughput` near zero,
   balance near zero) and collapse them iteratively.
 - **`Mint`'s `sender` is whoever called `mint()`, not who paid.** Matching by address
   lost over 13,000 tokens; match by direction and amount instead.
 
-And the finding that only appears once you do this: **68% of that window's net buying
-came from three "buy then immediately LP" bots whose wallet balances are zero** — the
-tokens sit in the pool as liquidity. Any holder analysis built on balances is blind to
-them.
+And the corollary for holder analysis: those bots hold nothing at window end, so a
+balance-based view is right to ignore them — the first version of this entry said they
+were 68% of net buying and that balances were "blind to them". They were 0% of it.
 
 ## 29. A transfer to the pool address is not a sale
 
@@ -672,6 +703,44 @@ cut the log off from the run it was logging.
   database, so `--verify` still sees every window a detached log failed to report. A
   coverage figure comes from `--verify`, never from grepping a log.
 
+## 32. Every claim about an address carries a block, a scope and a sample size
+
+Four of one briefing's claims failed review for the same reason: each was true of
+something, just not of what it said.
+
+- **Balances without a block.** Two wallets' stablecoin holdings were read at `latest`,
+  hours apart, and summed as one cluster's headline total — mixing two moments, double-counting
+  money they had moved between each other, and missing eight figures of native coin entirely.
+  Read holdings at the snapshot block, from an archive node, and state the block.
+- **Lifetime counts in a window sentence.** "N inflows from the router" was the
+  address's lifetime count; inside the window it was smaller. When a sentence names a window,
+  every count in it is windowed.
+- **"New" relative to what.** An address "brand new" to the token had tens of millions in stablecoins, thousands of BNB
+  and tens of thousands of transactions before the token ever reached it. First-seen is a
+  question about the account — nonce, native balance, other tokens — not about one
+  token's transfer table. A "new buyer" was a high-frequency bot whose nonce rose more than
+  fourfold during the window.
+- **A schedule read off nine rows.** "Sweeps every 4 hours at :36/:37" came from a
+  handful of transfers. Over the address's full history of sweeps it fitted under a fifth of them; the dominant
+  pattern was a different minute and a 12-hour interval, and the schedule had changed
+  three times. A periodicity claim needs the full distribution, and the date range it
+  holds over.
+
+## 33. Zero-value transfers poison lineage
+
+Address-poisoning attacks send `0`-value transfers from look-alike addresses to make a
+victim's history show the attacker. A lineage walk keyed on "first inflow came from the
+issuer" then happily adopts the attacker: in one audit about one "issuer lineage"
+address in ten had only ever received zero tokens. Drop `val == 0` rows before any
+provenance or first-funder test, and treat a look-alike prefix/suffix match against a
+known address as a reason to look harder, not as kinship.
+
+Two related traps from the same walk: a **degree cap** that discards high-degree
+addresses as infrastructure also discards issuer-funded wallets that later became busy —
+keep "first funded by lineage, now over the cap" as its own bucket for review; and
+token-graph degree does not identify routers (two MEV routers there had degree 5–6) —
+detect pass-through by in-and-out within the same transaction.
+
 ## Quick self-checks
 
 | Check | Passes when |
@@ -692,6 +761,10 @@ cut the log off from the run it was logging.
 | Venue coverage | Enumeration method stated (factory sweep across every fee tier × quote, V2 `getPair`, plus counterparty mining), and the measured pools' share of discovered quote printed beside every market figure |
 | Window liquidity change | Mint / Burn / Collect / Swap counted over the reporting window with NO topic filter; `Mint == 0 && Burn > 0` treated as a broken query, not a quiet pool; every depth figure carries that window |
 | Pool-leg decomposition | Flow computed from `Swap` amounts only; `Δbalance == Σswap + Σmint − Σcollect − ΣcollectProtocol` closes, with `Burn` excluded |
+| Holder flow | Swaps in transactions that also carry Mint/Burn/Collect reported apart; the number quoted as market flow is the trades-only line, never the Swap-only gross |
+| Custody quantified | Any large cluster tested for custody (nonce, native balance, predates token, shared gas funder, multi-token migration) AND for issuer deposits through its deposit addresses — the two are not alternatives |
+| Address claims scoped | Every balance has a block; every count in a window sentence is windowed; "new" checked against nonce and other tokens; any periodicity claim shown on the full distribution |
+| Lineage hygiene | `val == 0` transfers dropped before provenance; lineage-funded addresses over the degree cap kept for review |
 | Conduits folded | Pass-through routers collapsed before any buyer/seller ranking; no episode described with an intermediary's lifetime totals |
 | Addresses and topics derived | Every contract address proved with `eth_getCode != "0x"` and written out in full; every topic0 computed by keccak and shown to occur at that address before an empty result from it means anything; price from `sqrtPriceX96`, never from the tick |
 | Certification travels | Any artefact built over a `--force`d database is stamped on the artefact itself, not only in the database's metadata |

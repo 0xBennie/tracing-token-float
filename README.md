@@ -82,7 +82,7 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             31 traps that corrupt results while every number still looks fine
+    pitfalls.md             33 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
   scripts/
     selftest.py             checks the skill against itself — derived constants, runbook

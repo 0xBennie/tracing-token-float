@@ -14,9 +14,11 @@ Three things this exists to stop, all of which shipped in one audit:
      minted cannot be burned).
 
   2. "Net flow to market = tokens out of the pool minus tokens in." That counts Mint as
-     the market dumping and Collect as the market buying. The real net was over 4x larger
-     than the figure published, and the gap was liquidity provisioning. Flow here comes
-     from Swap amounts and nothing else.
+     the market dumping and Collect as the market buying. Swap amounts fix that — and
+     then count LP round trips as trades: a bot that buys and re-mints in one
+     transaction is a "buyer" holding nothing at the end. A Swap-only net was once
+     published at 4.6x what holders actually took. So swaps are split by transaction:
+     anything sharing a tx with Mint/Burn/Collect is reported apart from holder flow.
 
   3. A silent short read. The identity below closes to dust or it does not close, and a
      log query that came back short cannot survive it:
@@ -104,30 +106,51 @@ def main():
     for problem in TP.liquidity_sanity(counts):
         print(f"\n  !! {problem}")
 
-    # ---- flow, from Swap and only Swap -------------------------------------
+    # ---- flow, from Swap, classified by TRANSACTION ------------------------
+    # A Swap-only net still counts LP round trips as trades: a bot that buys and mints
+    # the tokens straight back in the same transaction is a "buyer" by its Swap leg and
+    # ends the window holding nothing. One audit published a Swap-only net of ~130k as
+    # "real net buying"; holders had actually taken ~29k. So every transaction in which
+    # the pool also emits Mint, Burn or Collect is liquidity management, and its Swap legs
+    # are reported apart from the trades (pitfall #28).
     swap_t = set(TP.swap_topics())
-    bought0 = sold0 = bought1 = sold1 = 0
-    nbuy = nsell = 0
-    for l in logs:
-        if not l["topics"] or l["topics"][0] not in swap_t:
-            continue
-        w = _words(l["data"])
-        a0, a1 = s256(w[0]), s256(w[1])       # signed, from the POOL's perspective
-        if a1 > 0:                             # token1 into the pool == token1 sold
-            sold1 += a1; nsell += 1
-        else:
-            bought1 += -a1; nbuy += 1
-        if a0 > 0:
-            sold0 += a0
-        else:
-            bought0 += -a0
-    net0, net1 = sold0 - bought0, sold1 - bought1
+    lp_t = {TP.T["v3.Mint"], TP.T["v3.Burn"], TP.T["v3.Collect"]}
+    lp_tx = {l["transactionHash"] for l in logs if l["topics"] and l["topics"][0] in lp_t}
 
-    print(f"\n  TRUE FLOW  (Swap only — Mint/Burn/Collect are not trades)")
-    print(f"    token1 sold into the pool   {sold1 / 10**d1:>18,.6f}   {nsell:>7,} swaps")
-    print(f"    token1 bought out of it     {bought1 / 10**d1:>18,.6f}   {nbuy:>7,} swaps")
-    print(f"    token1 NET into the pool    {net1 / 10**d1:>18,.6f}")
-    print(f"    token0 NET into the pool    {net0 / 10**d0:>18,.6f}")
+    def tally(rows):
+        b0 = s0 = b1 = s1 = nb = ns = 0
+        for l in rows:
+            w = _words(l["data"])
+            a0, a1 = s256(w[0]), s256(w[1])   # signed, from the POOL's perspective
+            if a1 > 0:
+                s1 += a1; ns += 1               # token1 into the pool == token1 sold
+            else:
+                b1 += -a1; nb += 1
+            if a0 > 0:
+                s0 += a0
+            else:
+                b0 += -a0
+        return dict(sold1=s1, bought1=b1, sold0=s0, bought0=b0, nsell=ns, nbuy=nb,
+                    net1=s1 - b1, net0=s0 - b0)
+
+    swaps = [l for l in logs if l["topics"] and l["topics"][0] in swap_t]
+    allf = tally(swaps)
+    trade = tally([l for l in swaps if l["transactionHash"] not in lp_tx])
+    rtrip = tally([l for l in swaps if l["transactionHash"] in lp_tx])
+    sold1, bought1, nsell, nbuy = allf["sold1"], allf["bought1"], allf["nsell"], allf["nbuy"]
+    net0, net1 = allf["net0"], allf["net1"]
+
+    print(f"\n  FLOW  (Swap events only; signed from the pool's side, + = into the pool)")
+    print(f"    {'':34}{'token1 sold':>18}{'token1 bought':>18}{'token1 NET in':>18}{'swaps':>9}")
+    for lab, t in (("all swaps (gross)", allf),
+                   ("  of which LP round-trip txs", rtrip),
+                   ("HOLDER FLOW (trades only)", trade)):
+        print(f"    {lab:34}{t['sold1'] / 10**d1:>18,.4f}{t['bought1'] / 10**d1:>18,.4f}"
+              f"{t['net1'] / 10**d1:>18,.4f}{t['nsell'] + t['nbuy']:>9,}")
+    print(f"    HOLDER FLOW token0 NET in        {trade['net0'] / 10**d0:>18,.4f}")
+    print(f"    {len(lp_tx):,} transaction(s) carried Mint/Burn/Collect alongside or instead of "
+          f"a swap. Quote the HOLDER line as market flow; the gross line counts LP round "
+          f"trips as buyers.")
 
     # ---- the identity ------------------------------------------------------
     mint0 = mint1 = coll0 = coll1 = cp0 = cp1 = 0
@@ -142,8 +165,11 @@ def main():
             cp0 += w[-2]; cp1 += w[-1]
 
     def bal(tok, blk):
-        return int(cli.call("eth_call", [{"to": tok, "data": BALANCE_OF
-                                          + pool[2:].rjust(64, "0")}, hex(blk)]), 16)
+        # HISTORICAL state, so the archive pool. Asking the default (pruned) pool made
+        # this identity — the one check that catches a log query that came back short —
+        # fail with "could not read balances" on every run and skip itself.
+        return int(gcli.call("eth_call", [{"to": tok, "data": BALANCE_OF
+                                           + pool[2:].rjust(64, "0")}, hex(blk)]), 16)
     print(f"\n  IDENTITY  d(balance) == swap + mint - collect - collectProtocol")
     print(f"            (Burn is absent on purpose: it moves no tokens)")
     try:
@@ -153,7 +179,21 @@ def main():
             delta = bal(tok, hi) - bal(tok, lo)
             model = net + mint - coll - cp
             resid = delta - model
-            flag = "OK" if abs(resid) <= max(10 ** (dec - 12), 1) else "!! DOES NOT CLOSE"
+            # Tolerance relative to the volume that crossed the boundary. Payers routinely
+            # over-send a few wei inside the swap callback, so a real window closes to
+            # dust, not to zero (one closed to a fraction of a token over tens of thousands of
+            # swaps, every wei of it traced to a handful of transactions). A 1e-12 absolute tolerance flagged that as a
+            # failure on every run — a gate that always fires gets ignored. A short log
+            # read misses whole swaps and lands orders of magnitude above this band.
+            gross = (sold1 + bought1 + mint + coll + cp) if name == "token1" \
+                else (allf["sold0"] + allf["bought0"] + mint + coll + cp)
+            tol = max(gross // 10 ** 8, 1)
+            if resid == 0:
+                flag = "OK (exact)"
+            elif abs(resid) <= tol:
+                flag = f"OK (dust; tolerance {tol / 10**dec:.6g})"
+            else:
+                flag = "!! DOES NOT CLOSE — a leg is missing or a window came back short"
             print(f"    {name}  chain {delta / 10**dec:>18,.6f}   model "
                   f"{model / 10**dec:>18,.6f}   residual {resid / 10**dec:>14,.9f}  {flag}")
     except Exception as e:
@@ -164,11 +204,13 @@ def main():
         print("\n" + json.dumps({
             "window": [lo, hi], "asked": asked, "answered": answered, "refused": refused,
             "census": {("/".join(TP.NAME.get(k, [])) or k): v for k, v in counts.items()},
-            "swap_only": {"token1_sold": sold1 / 10 ** d1,
-                          "token1_bought": bought1 / 10 ** d1,
-                          "token1_net_into_pool": net1 / 10 ** d1,
-                          "token0_net_into_pool": net0 / 10 ** d0,
-                          "n_sell": nsell, "n_buy": nbuy},
+            "swap_gross": {k: (v / 10 ** (d1 if k.endswith("1") else d0)
+                               if isinstance(v, int) and not k.startswith("n") else v)
+                           for k, v in allf.items()},
+            "holder_flow": {k: (v / 10 ** (d1 if k.endswith("1") else d0)
+                                if isinstance(v, int) and not k.startswith("n") else v)
+                            for k, v in trade.items()},
+            "lp_roundtrip_txs": len(lp_tx),
             "_note": "counts are FLOORS whenever refused > 0"}, indent=1, default=str))
 
     sys.exit(2 if refused else 0)

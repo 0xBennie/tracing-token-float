@@ -122,11 +122,11 @@ class Pool:
         lo = (MIN_TICK // self.ts) >> 8 if down is None else ((self.tick - down) // self.ts) >> 8
         hi = (MAX_TICK // self.ts) >> 8 if up is None else ((self.tick + up) // self.ts) >> 8
         wps = list(range(lo, hi + 1))
-        words = dict(zip(wps, (int(r, 16) for r in self.c.batch(
-            [self._bitmap_call(w, b) for w in wps]))))
+        bm = [self._bitmap_call(w, b) for w in wps]
+        words = dict(zip(wps, (int(r, 16) for r in self._many(bm, b))))
         ticks = sorted(((w << 8) + i) * self.ts
                        for w, v in words.items() if v for i in range(256) if v >> i & 1)
-        raw = self.c.batch([self._tick_call(t, b) for t in ticks])
+        raw = self._many([self._tick_call(t, b) for t in ticks], b)
         self.net = {t: self._tick_net(r) for t, r in zip(ticks, raw)}
         self.ticks = ticks
 
@@ -135,6 +135,16 @@ class Pool:
     # simulator unchanged.
     def _bitmap_call(self, w, b):
         return ("eth_call", [{"to": self.a, "data": SEL["bitmap"] + f"{_u256(w):064x}"}, b])
+
+    def _many(self, reqs, b):
+        """eth_calls in bulk: Multicall3 when it can be proven to work, else batching."""
+        try:
+            from rpc import multicall
+            calls = [(r[1][0]["to"], r[1][0]["data"]) for r in reqs]
+            blk = b if b not in (None, "latest") else "latest"
+            return multicall(self.c, calls, blk, probe=calls[0] if calls else None)
+        except Exception:
+            return self.c.batch(reqs)
 
     def _tick_call(self, t, b):
         return ("eth_call", [{"to": self.a, "data": SEL["ticks"] + f"{_u256(t):064x}"}, b])
@@ -318,10 +328,35 @@ class Pool:
         end_px = 1 / (sqrtP ** 2 * 10 ** (self.d0 - self.d1))
         return dict(requested=amount1, filled=filled, proceeds=proceeds,
                     avg=proceeds / filled if filled else 0.0, end_price=end_px,
+                    end_sqrtP=sqrtP,
                     drawdown_pct=(end_px / self.price1 - 1) * 100,
                     partial=filled < amount1 * 0.999,
                     stop="quote exhausted" if capped
                          else ("liquidity exhausted" if rem > 0 else "filled"))
+
+    def quote_between1(self, sqrt_to):
+        """token0 THIS book releases as sqrtP rises from spot to `sqrt_to`.
+
+        Exit number 3 (issuer net cash) needs it. When the issuer sells into the whole
+        book, each segment pays out L_active * d(1/sqrtP), split pro rata by liquidity;
+        the part that is not its own money is exactly what the THIRD-PARTY book releases
+        over the same price path. So: run the whole-book sale to find where the price
+        ends, then ask the counterfactual book (excluding()) how much quote it gives up
+        between spot and there. Note this is NOT the counterfactual book selling the same
+        size — the price path is the whole book's.
+        """
+        out, sqrtP, L = 0.0, self.sqrtP, float(self.L0)
+        for t in sorted(t for t in self.ticks if t > self.tick):
+            if sqrtP >= sqrt_to:
+                break
+            sn = min(1.0001 ** (t / 2), sqrt_to)
+            if sn > sqrtP and L > 0:
+                out += L * (1 / sqrtP - 1 / sn)
+            sqrtP = sn
+            if sn >= sqrt_to:
+                break
+            L += self.net[t]
+        return out / 10 ** self.d0
 
     @property
     def price1(self):

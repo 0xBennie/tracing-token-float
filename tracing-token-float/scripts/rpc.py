@@ -80,7 +80,7 @@ MAX_SPAN = {"bsc": 20000, "base": 2000, "eth": 2000}
 DEAD_FOR_LOGS = ("requires a personal token", "is not supported", "method not found",
                  "header not found", "not available on your plan")
 
-MAX_BATCH = 120
+MAX_BATCH = 100
 
 
 class RangeError(Exception):
@@ -139,6 +139,8 @@ def classify(msg):
     m = str(msg).lower()
     if _has(m, DEAD_FOR_LOGS):
         return "dead"
+    if _has(m, PRUNED_SIGNS):
+        return "pruned"
     if _has(m, REVERT_SIGNS):
         return "revert"
     rate = _has(m, RATE_SIGNS)
@@ -170,6 +172,20 @@ def redact(text):
 # never answered", which is both wrong and the exact confusion the census exists to stop.
 REVERT_SIGNS = ("execution reverted", "revert", "invalid opcode", "out of gas",
                 "stack underflow", "invalid jump")
+
+
+# A pruned node asked for state it no longer keeps. Public BSC nodes keep roughly the
+# last 128 blocks; a balanceOf at a block fifty minutes old already comes back as
+# "missing trie node". Every pruned endpoint gives the same answer, so this is neither a
+# refusal a retry fixes nor a revert — it means "ask an archive node". Left
+# unclassified it was rotated through every pruned endpoint and booked as a refusal,
+# and poolflow's balance identity (the gate that catches a short log read) never ran.
+PRUNED_SIGNS = ("missing trie node", "archive request", "historical state",
+                "state is not available", "state histories")
+
+
+class PrunedStateError(RuntimeError):
+    """This endpoint does not keep the state asked for. Use an archive pool."""
 
 
 class RevertError(RuntimeError):
@@ -300,6 +316,14 @@ class Client:
                     if kind == "rate":
                         time.sleep(1.5 * (i + 1))     # back off, do NOT split the window
                         continue
+                    if kind == "pruned":
+                        # The question did go unanswered, so it counts as refused — but
+                        # rotating to another pruned node cannot change the answer.
+                        CENSUS.refused[method] += 1
+                        raise PrunedStateError(
+                            f"{method} asked a pruned node for historical state "
+                            f"({j['error']}). Use an archive pool such as "
+                            f"Client(LOG_EPS[chain]); retrying will not help.")
                     if kind == "revert":
                         # The chain answered. Every other endpoint will answer the same,
                         # so stop here instead of burning the rotation on it.
@@ -316,8 +340,8 @@ class Client:
                     last = f"{url}: result=null"      # never hand None to a caller
                     continue
                 return self._answered(method, j["result"])
-            except (RangeError, RevertError):
-                raise                 # a revert is the chain's answer; do not retry it
+            except (RangeError, RevertError, PrunedStateError):
+                raise                 # none of these improves on another endpoint
             except Exception as e:
                 last = f"{url}: {e}"
             time.sleep(0.35 * (i + 1))
@@ -389,3 +413,108 @@ class Client:
 def s256(v):
     """Two's-complement decode of a full 256-bit ABI word. Use for every signed return."""
     return v - (1 << 256) if v >= (1 << 255) else v
+
+
+class PinnedClient:
+    """A Client whose every `latest` is rewritten to one fixed block.
+
+    A tool that reads "latest" in thirty places cannot be pinned by threading a block
+    argument through each of them, and a half-pinned run is worse than an unpinned one:
+    it mixes two states and reports them as one. The previous audit's depth figures
+    reproduced at a tick that was not the snapshot block's, because the profile was read
+    at latest while the snapshot was named elsewhere. Wrap the ARCHIVE pool in this and
+    every call lands on the same block — pruned nodes cannot serve it (PrunedStateError).
+    """
+
+    def __init__(self, client, block):
+        self._c = client
+        self.block = block if isinstance(block, str) else hex(block)
+
+    def _pin(self, params):
+        return [self.block if p == "latest" else p for p in params]
+
+    def call(self, method, params, *a, **kw):
+        return self._c.call(method, self._pin(params), *a, **kw)
+
+    def batch(self, reqs, *a, **kw):
+        return self._c.batch([(m, self._pin(p)) for m, p in reqs], *a, **kw)
+
+    def eth_call(self, to, data, block="latest"):
+        return self.call("eth_call", [{"to": to, "data": data}, block])
+
+    def erc20_balance(self, token, holder, dec=18, block="latest"):
+        return int(self.eth_call(token, "0x70a08231" + holder[2:].rjust(64, "0"),
+                                 block), 16) / 10 ** dec
+
+    def block_number(self):
+        return int(self.block, 16)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+# Multicall3, so a pinned full-range scan fits inside a public archive quota. A V3 pool
+# with tickSpacing 1 has ~6,932 bitmap words; at 100 per JSON-RPC batch that is 70 heavy
+# requests and the shared archive key ran out of quota partway through. aggregate3 packs
+# hundreds of calls into ONE eth_call. allowFailure is FALSE on every call, so one bad
+# sub-call reverts the whole thing instead of quietly returning an empty word that would
+# read as "no ticks here". The address is the widely deployed canonical one, but it is
+# NOT trusted for that: multicall() proves it — code present, and a probe call returns
+# byte-for-byte what a direct eth_call returns — before using it (pitfall #22).
+MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11"
+_AGG3 = "0x82ad56cb"          # aggregate3((address,bool,bytes)[])
+_MC_OK = {}
+
+
+def _enc_agg3(calls):
+    n = len(calls)
+    heads, body, off = [], [], 32 * n
+    for to, data in calls:
+        d = bytes.fromhex(data[2:])
+        pad = (32 - len(d) % 32) % 32
+        el = (to[2:].lower().rjust(64, "0") + "0" * 64 + f"{0x60:064x}"
+              + f"{len(d):064x}" + d.hex() + "00" * pad)
+        heads.append(f"{off:064x}")
+        body.append(el)
+        off += len(el) // 2
+    return _AGG3 + f"{0x20:064x}" + f"{n:064x}" + "".join(heads) + "".join(body)
+
+
+def _dec_agg3(ret):
+    h = ret[2:]
+    word = lambda i: int(h[i * 64:(i + 1) * 64], 16)
+    n = word(1)
+    base = 2 * 64                                    # hex offset where element offsets start
+    out = []
+    for k in range(n):
+        eo = base + int(h[base + k * 64: base + (k + 1) * 64], 16) * 2
+        ok = int(h[eo:eo + 64], 16)
+        ln = int(h[eo + 128:eo + 192], 16)
+        data = h[eo + 192: eo + 192 + ln * 2]
+        if not ok:
+            raise RuntimeError("multicall sub-call failed despite allowFailure=false")
+        out.append("0x" + data)
+    return out
+
+
+def multicall(client, calls, block="latest", chunk=400, probe=None):
+    """Results of [(to, data), ...] via Multicall3, in order. Raises if it cannot prove
+    Multicall3 works on this client — callers fall back to plain batching."""
+    key = id(client)
+    if key not in _MC_OK:
+        code = client.call("eth_getCode", [MULTICALL3, block]) or "0x"
+        if code in ("0x", "0x0"):
+            raise RuntimeError("no Multicall3 code at the canonical address on this chain")
+        if probe:
+            direct = client.call("eth_call", [{"to": probe[0], "data": probe[1]}, block])
+            via = _dec_agg3(client.call("eth_call", [{"to": MULTICALL3,
+                                         "data": _enc_agg3([probe])}, block]))[0]
+            if int(direct, 16) != int(via, 16):
+                raise RuntimeError("Multicall3 probe disagrees with a direct eth_call")
+        _MC_OK[key] = True
+    out = []
+    for i in range(0, len(calls), chunk):
+        part = calls[i:i + chunk]
+        out += _dec_agg3(client.call("eth_call", [{"to": MULTICALL3,
+                                       "data": _enc_agg3(part)}, block]))
+    return out

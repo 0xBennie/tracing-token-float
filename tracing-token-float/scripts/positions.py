@@ -339,11 +339,19 @@ def collect(cli, gcli, pool_addr, issuers, hi, chain, nfpm=None, token=None):
                 sym0=sym(cli, t0), sym1=sym(cli, t1))
 
 
-def classify(row, tick, price_of):
-    if row["tick_upper"] <= tick:
-        return "bid"          # entirely on the token1 side: the owner's own bid
-    if row["tick_lower"] > tick:
-        return "ladder"       # entirely token0: a row of limit orders, not liquidity
+def classify(row, tick, quote_is_token0):
+    """bid / ladder / in-range, decided by WHICH token the position holds.
+
+    A position below its range (tick < tickLower) holds only token0; above it
+    (tick >= tickUpper) only token1. Whether that is a bid or a ladder depends on
+    which side is the quote — and this function used to assume token1 always was.
+    On a USDT/TOKEN pool (USDT is token0) it labelled a pure-USDT bid "ladder, cannot
+    absorb a sale" and a token-only ladder "the issuer's own bid": exactly inverted.
+    """
+    if row["tick_lower"] > tick:              # all token0
+        return "bid" if quote_is_token0 else "ladder"
+    if row["tick_upper"] <= tick:             # all token1
+        return "ladder" if quote_is_token0 else "bid"
     return "in-range"
 
 
@@ -366,7 +374,7 @@ def report(res, issuers, cli, pool_addr, as_json=False):
     for r in res["rows"]:
         b = by_owner[r["owner"]]
         b["a0"] += r["amount0"]; b["a1"] += r["amount1"]; b["n"] += 1
-        b["kinds"][classify(r, tick, px)] += 1
+        b["kinds"][classify(r, tick, res.get('flip', True))] += 1
     iss0 = sum(b["a0"] for b in by_owner.values())
     iss1 = sum(b["a1"] for b in by_owner.values())
 
@@ -382,7 +390,7 @@ def report(res, issuers, cli, pool_addr, as_json=False):
             hi = px(r["tick_upper"]) if r["tick_upper"] < MAX_TICK else float("inf")
             band = "full range" if lo == 0 and hi == float("inf") else f"{lo:,.6g} - {hi:,.6g}"
             print(f"     {r['token_id']:>9} {r['owner']:42} "
-                  f"{classify(r, tick, px):8} {band:>30} "
+                  f"{classify(r, tick, res.get('flip', True)):8} {band:>30} "
                   f"{r['amount0']:>14,.2f} {r['amount1']:>14,.2f}")
         print(f"\n  BY OWNER")
         for a, b in sorted(by_owner.items(), key=lambda kv: -kv[1]["a1"]):
@@ -436,6 +444,7 @@ def report(res, issuers, cli, pool_addr, as_json=False):
         iss_pos = [(r["tick_lower"], r["tick_upper"], r["liquidity"]) for r in res["rows"]]
         print(f"\n    [2] POST-WITHDRAWAL EXIT — COUNTERFACTUAL: the issuer pulls its")
         print(f"        {len(iss_pos)} position(s) first, then a third party sells")
+        cf = None
         try:
             cf = pool.excluding(iss_pos)
             cf_sell = (lambda n: cf.sell1(n)) if flip else (lambda n: cf.sell(n))
@@ -453,14 +462,28 @@ def report(res, issuers, cli, pool_addr, as_json=False):
         except InconsistentState as e:
             print(f"          cannot be computed: {str(e)[:140]}")
 
-        # 3. Whether the issuer can execute [2] at will.
-        print(f"\n    [3] CAN THEY? the issuer holds {share:.2f}% of the {qsym} in this book")
-        print(f"        Check every position NFT for a lock before treating [1] as stable:")
+        # 3. ISSUER NET CASH — the issuer sells into the WHOLE book; each segment pays
+        #    out by liquidity share, and only the third-party share is money that was
+        #    not already the issuer's. That equals what the counterfactual book releases
+        #    over the whole book's price path (Pool.quote_between1). An earlier version
+        #    of this block printed the label "[3]" over a share percentage and never
+        #    computed this number.
+        print(f"\n    [3] ISSUER NET CASH — the issuer sells its own bag into the whole book;")
+        print(f"        external = quote that did not come out of its own positions")
+        if flip and cf is not None:
+            for n in (10_000, 100_000, 1_000_000):
+                try:
+                    r = pool.sell1(n)
+                    ext = cf.quote_between1(r["end_sqrtP"])
+                    print(f"          sell {n:>9,.0f} {tsym:<8} gross {r['proceeds']:>12,.2f}"
+                          f"   external {ext:>11,.2f} {qsym}")
+                except Exception as e:
+                    print(f"          sell {n:>9,.0f} {tsym:<8} -> unavailable ({str(e)[:50]})")
+        else:
+            print(f"          not computed: needs the subject as token1 and a valid "
+                  f"counterfactual book")
+        print(f"\n    CAN THEY? the issuer holds {share:.2f}% of the {qsym} in this book.")
         print(f"        ownerOf() an EOA with no timelock means [2] is one transaction away.")
-        if share > 50:
-            print(f"        The issuer selling into its OWN bid is money moving between its")
-            print(f"        own pockets — that is a third number again (issuer net cash),")
-            print(f"        and it is NOT [1] and NOT [2].")
         if iss_q > tot_q * 1.01:
             print(f"    !! the issuer's positions exceed the whole book. One of the two")
             print(f"       measurements is wrong — do not publish either.")
@@ -468,21 +491,18 @@ def report(res, issuers, cli, pool_addr, as_json=False):
         print(f"      = {tot_q - iss_q:,.2f}. Nobody can execute against this. It is here")
         print(f"      only so it is never again printed under the word 'reach'.")
 
-    ladders = [r for r in res["rows"] if classify(r, tick, px) == "ladder"]
+    qflip = res.get("flip", True)
+    ladders = [r for r in res["rows"] if classify(r, tick, qflip) == "ladder"]
     if ladders:
-        lo = min(px(r["tick_lower"]) for r in ladders)
-        fin = [r["tick_upper"] for r in ladders if r["tick_upper"] < MAX_TICK]
-        hi = px(max(fin)) if fin else float("inf")
-        held = sum(r["amount0"] for r in ladders)
-        print(f"\n    {len(ladders)} of the issuer's positions sit entirely ABOVE spot, "
-              f"{lo/spot:,.2f}x - {hi/spot:,.2f}x")
-        print(f"    holding {held:,.2f} {s0} and no {s1}. That is a sell ladder, not")
-        print(f"    liquidity: it cannot absorb a sale, it competes with one.")
-    bids = [r for r in res["rows"] if classify(r, tick, px) == "bid"]
+        held = sum(r["amount1"] if qflip else r["amount0"] for r in ladders)
+        print(f"\n    {len(ladders)} issuer position(s) hold only {res.get('tsym', s1)} "
+              f"({held:,.2f}) and no {res.get('qsym', s0)}: a sell ladder, not liquidity.")
+        print(f"    It cannot absorb a sale; it competes with one.")
+    bids = [r for r in res["rows"] if classify(r, tick, qflip) == "bid"]
     if bids:
-        hi = max(px(r["tick_upper"]) for r in bids)
-        print(f"\n    {len(bids)} position(s) sit entirely BELOW spot, up to {hi/spot:,.2f}x"
-              f" — the issuer's own bid, already counted above")
+        held = sum(r["amount0"] if qflip else r["amount1"] for r in bids)
+        print(f"\n    {len(bids)} issuer position(s) hold only {res.get('qsym', s0)} "
+              f"({held:,.2f}): a pure bid, already inside [1] and removed in [2]")
     if res.get("unreadable"):
         print(f"\n    ! {len(res['unreadable'])} address(es) could not be enumerated; their")
         print(f"      positions are in neither figure. The split above is a FLOOR.")
@@ -521,12 +541,19 @@ def main():
                         "it the quote side is inferred from the stable registry, and if "
                         "that is ambiguous the run refuses rather than guessing — a "
                         "guess here reports one token's amount in the other's unit")
+    p.add_argument("--block", type=int,
+                   help="pin EVERY read to this block, via the archive pool. Without it the "
+                        "profile is read at latest and cannot be matched to a snapshot")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
 
     cli = Client(NETS[a.chain])
     gcli = Client(LOG_EPS[a.chain])
     issuers = [x.lower() for x in a.issuer]
+    if a.block:
+        from rpc import PinnedClient
+        cli = PinnedClient(Client(LOG_EPS[a.chain]), a.block)
+        print(f"  pinned to #{a.block:,} (archive pool) — every read lands on this block")
     hi = cli.block_number()
     # NOT a monkeypatch. `import positions as _self` from inside `python positions.py`
     # loads a SECOND copy of this module under the name "positions" and patches that
