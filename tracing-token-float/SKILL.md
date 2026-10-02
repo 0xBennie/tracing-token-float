@@ -101,6 +101,10 @@ python balances.py --db t.db --supply 1000000000 \
        --exclude 0xADAPTER:bridge-escrow:bridge_escrow --top 30
 #   Prints the itemised subtraction and asserts it closes in wei. Every percentage it
 #   prints names its denominator; --show ADDR prints one address both ways side by side.
+#   After an increment, always pass --at-block <to_block>: replay.py retires a balances
+#   table that fell behind (pitfall #34), and `--verify` shows DERIVED TABLES current/STALE.
+#   "Dead chips" / dormancy: name the definition (any / out / never-sent) and bucket
+#   issuer, exchange, vault and pool balances out before calling anything retail.
 
 # L5  Keys. Safes that share signers are ONE controller, not several holders.
 python control.py safes --chain bsc --token 0xTOKEN --float <float> 0xSAFE1 0xSAFE2 ...
@@ -274,6 +278,8 @@ Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above)
 |---|---|
 | Trusting an explorer's holder list | Contract-held and bridged balances are misattributed; you never see the flows |
 | Mixed numerator/denominator | Headline percentage is meaningless |
+| Reading the persisted `balances` table after an increment | It describes the old snapshot while `meta.to_block` says the new one; stamp, retire, rebuild (pitfall #34) |
+| Calling idle exchange or vault balances "dead chips" | Custody and depositor funds look dormant in aggregate and are fully liquid; bucket by holder class first |
 | Treating pool ERC-20 balance as the issuer's LP position | Third-party LPs and JIT liquidity get attributed to the issuer |
 | Weighted lineage on a high-frequency address | Its own churn dilutes provenance to noise; use the first-funding tx and pool-creation-block position — a net balance fails the same way |
 | Classifying behaviour from net flow or buy/sell counts | Both discard time; a one-block snipe followed by six weeks of distribution reads as accumulation |

@@ -169,6 +169,49 @@ def fetch_window(cli, token, lo, hi, empty_quorum=2):
     return rows_from(logs, lo, hi)
 
 
+def balances_snapshot(c, prev_hi=None):
+    """The block the persisted `balances` table describes, or None if there is none.
+
+    Databases built before the stamp was mandatory carry snapshot_block = "": the table
+    was then built at the head of the day, so the best bound is the head before this
+    increment (prev_hi), or failing that the last block any row in it touched.
+    """
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='balances'"
+                     ).fetchone():
+        return None
+    snap = meta_get(c, "snapshot_block")
+    if snap not in (None, ""):
+        return int(snap)
+    if prev_hi not in (None, ""):
+        return int(prev_hi)
+    return c.execute("SELECT MAX(last_block) FROM balances").fetchone()[0]
+
+
+def retire_stale_balances(c, prev_hi, new_hi):
+    """An increment moved to_block past the persisted balances: take the table out of
+    the name `balances` before anyone reads it as current. Pitfall #34.
+
+    The table is a cache balances.py rebuilds, so nothing is deleted — it is renamed to
+    the block it describes, and a `SELECT ... FROM balances` fails loudly instead of
+    returning the past. meta.to_block alone advancing is exactly what made a 9-day-old
+    table look like the new snapshot.
+    """
+    snap = balances_snapshot(c, prev_hi)
+    if snap is None or snap >= new_hi:
+        return
+    name = f"balances_at_{snap}"
+    k = 1
+    while c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (name,)).fetchone():
+        k += 1
+        name = f"balances_at_{snap}_{k}"
+    c.execute(f"ALTER TABLE balances RENAME TO {name}")
+    c.execute("INSERT OR REPLACE INTO meta VALUES('snapshot_block','')")
+    c.execute("INSERT OR REPLACE INTO meta VALUES('balances_retired_to',?)", (name,))
+    c.commit()
+    print(f"  balances table described #{snap:,}; to_block is now #{new_hi:,}. Renamed to "
+          f"{name}. Rebuild: balances.py --db <db> --at-block {new_hi}", flush=True)
+
+
 def scan(cli, db, token, lo, hi, span=2000, workers=4):
     """Fetch every window in [lo, hi] that ranges_done does not already cover.
 
@@ -180,9 +223,10 @@ def scan(cli, db, token, lo, hi, span=2000, workers=4):
     c.execute("INSERT OR REPLACE INTO meta VALUES('token',?)", (token,))
     c.execute("INSERT OR REPLACE INTO meta VALUES('from_block',?)", (str(lo),))
     prev_hi = meta_get(c, "to_block")
-    c.execute("INSERT OR REPLACE INTO meta VALUES('to_block',?)",
-              (str(max(hi, int(prev_hi))) if prev_hi else str(hi),))
+    new_hi = max(hi, int(prev_hi)) if prev_hi else hi
+    c.execute("INSERT OR REPLACE INTO meta VALUES('to_block',?)", (str(new_hi),))
     c.commit()
+    retire_stale_balances(c, prev_hi, new_hi)
 
     todo = [(a, min(b, hi)) for a, b in
             [(x, x + span - 1) for x in range(lo, hi + 1, span)]]
@@ -277,6 +321,18 @@ def verify(db, cli=None):
         print("       anything from this database: a hole made of ordinary transfers is")
         print("       invisible to every check below.")
         ok = False
+
+    print("\n  DERIVED TABLES")
+    snap = balances_snapshot(c)
+    if snap is None:
+        print("    balances         none persisted")
+    elif snap == hi:
+        print(f"    balances         @#{snap:,}  current")
+    else:
+        # Not a certification failure — the transfers are what is certified — but any
+        # number read from this table describes #snap, not #hi. Pitfall #34.
+        print(f"    balances         @#{snap:,}  STALE — to_block is #{hi:,}. Do not read it "
+              f"as current; rebuild with balances.py --at-block {hi}")
 
     print("\n  SUPPLY IDENTITY")
     bal = {}

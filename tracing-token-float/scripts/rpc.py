@@ -500,6 +500,8 @@ def _dec_agg3(ret):
 def multicall(client, calls, block="latest", chunk=400, probe=None):
     """Results of [(to, data), ...] via Multicall3, in order. Raises if it cannot prove
     Multicall3 works on this client — callers fall back to plain batching."""
+    if isinstance(block, int):          # JSON-RPC wants a hex tag; a bare int is refused
+        block = hex(block)              # as -32602 and would be booked as a refusal
     key = id(client)
     if key not in _MC_OK:
         code = client.call("eth_getCode", [MULTICALL3, block]) or "0x"

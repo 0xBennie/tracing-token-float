@@ -243,6 +243,11 @@ def rebuild(db, at_block=None, force=False, progress=200_000):
         v = int(val)
         bal[frm] = bal.get(frm, 0) - v
         bal[dst] = bal.get(dst, 0) + v
+        if v == 0:
+            # Address poisoning: anyone can emit a zero-value Transfer FROM any address.
+            # Counting it as activity makes a wallet untouched for a year read as active
+            # yesterday — the dormancy split inverts. Balances are unaffected. Pitfall #33.
+            continue
         for a, out in ((frm, True), (dst, False)):
             r = st.get(a)
             if r is None:
@@ -261,8 +266,11 @@ def rebuild(db, at_block=None, force=False, progress=200_000):
     # -totalSupply on a fixed-supply token; leaving it in makes every total nonsense.
     bal.pop(ZERO, None)
     st.pop(ZERO, None)
+    # An address seen only in zero-value rows never held anything: it is a poison
+    # target, not a churned holder, and has no activity record to build from.
+    assert all(a in st for a, v in bal.items() if v), "nonzero balance with no activity"
     out = {a: Holder(bal[a], st[a][0], st[a][1], st[a][2], st[a][3], st[a][4], st[a][5])
-           for a in bal}
+           for a in bal if a in st}
     pos = [h for h in out.values() if h.wei > 0]
     neg = [a for a, h in out.items() if h.wei < 0]
     total = sum(h.wei for h in out.values())
@@ -329,7 +337,14 @@ def save(db, bal, supply_wei, float_wei=None, decimals=18, pct_denominator="supp
     c.execute("DELETE FROM balances")
     c.executemany("INSERT INTO balances VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
     c.commit()
-    _stamp(c, {"snapshot_block": at_block if at_block is not None else "",
+    # Never stamp an empty snapshot. "Head of the database" is a moving target: the
+    # next replay.py increment advances to_block and this table silently becomes the
+    # past. A concrete block is what lets replay.py and readers detect that. Pitfall #34.
+    if at_block is None:
+        hi = c.execute("SELECT v FROM meta WHERE k='to_block'").fetchone()
+        at_block = int(hi[0]) if hi else c.execute(
+            "SELECT MAX(block) FROM transfers").fetchone()[0]
+    _stamp(c, {"snapshot_block": at_block,
                "rebuilt_supply_wei": sum(h.wei for h in bal.values()),
                "total_supply_wei": supply_wei,
                "float_wei": float_wei if float_wei is not None else "",

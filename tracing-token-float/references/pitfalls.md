@@ -741,11 +741,55 @@ keep "first funded by lineage, now over the cap" as its own bucket for review; a
 token-graph degree does not identify routers (two MEV routers there had degree 5–6) —
 detect pass-through by in-and-out within the same transaction.
 
+The same rows corrupt **dormancy**. Anyone can emit a zero-value Transfer *from* any
+address, so a wallet untouched for a year shows "last active: yesterday" if the activity
+clock counts them. `balances.rebuild()` skips `val == 0` for `n_in/n_out/first_block/
+last_block`; an ad-hoc `MAX(block)` must say `WHERE val != '0'`.
+
+## 34. A derived table does not follow the database forward
+
+`balances.py` persisted its table with an empty `snapshot_block` when no `--at-block` was
+given. An increment later moved `meta.to_block` about two million blocks forward, the
+transfers were re-certified, and the old table kept the name `balances`. One SQL
+cross-check then read it as the new snapshot: a few hundred addresses disagreed, an
+issuer wallet that had since moved tens of thousands of tokens still showed them, and a
+dormancy split moved roughly a fifth of "recently active" holdings because it was a
+fortnight out of date. Nothing failed — `--verify` certifies the transfers, and the
+table was internally consistent.
+
+- `balances.save()` now always stamps a concrete `snapshot_block` (the head when no
+  `--at-block` is given). `replay.py` renames a table that falls behind a new `to_block`
+  to `balances_at_<block>`, so a stale `SELECT ... FROM balances` errors instead of
+  answering, and `--verify` prints `DERIVED TABLES ... STALE`.
+- Any table computed *from* `transfers` — balances, lineage, flow summaries — carries
+  the block it describes, and a reader checks it against `to_block` before quoting it.
+- Cross-check a balance against a recomputation from `transfers` at the snapshot block,
+  never against another derived table: two caches agreeing proves nothing.
+
+**"Dead chips" is three different numbers.** When asked how much of a float "never
+moves", say which one:
+
+1. *No nonzero transfer in or out for N days.* Any inbound top-up resets it, so it
+   understates dormancy for wallets that keep receiving.
+2. *No transfer out for N days* (falling back to the last inbound for wallets that never
+   sent). This is the "has not sold" reading and puts more in the dormant bucket.
+3. *Never sent a single transfer.* A different, structural question: buy-and-hold or
+   airdropped wallets, regardless of age.
+
+And bucket by **holder class first** — issuer, exchange custody (nonce in the millions,
+or a known family), protocol vault, pool, other contracts, then ordinary wallets. An
+exchange hot wallet's balance is idle in aggregate and liquid in fact; a vault's balance
+belongs to its depositors; neither is dormant retail. Issuer wallets get their own
+per-wallet idle table: an issuer that has not moved a large wallet in months is a
+supply overhang, not "locked".
+
 ## Quick self-checks
 
 | Check | Passes when |
 |---|---|
 | Supply identity | Rebuilt positive balances sum, in wei, exactly to `totalSupply` |
+| Derived freshness | Every derived table's stamped block equals `to_block`, or it is quoted with its own block — `--verify` shows `DERIVED TABLES ... current` |
+| Dormancy | Activity clock excludes `val == 0`; the definition (any / out / never-sent) is named; exchanges, vaults, pools and issuer wallets bucketed before retail |
 | No negatives | Zero addresses with negative rebuilt balance |
 | Holder count | Matches the block explorer at the same block |
 | Cross-chain | Adapter escrow == remote `totalSupply`, residual named |
