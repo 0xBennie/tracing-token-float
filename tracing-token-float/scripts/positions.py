@@ -35,7 +35,7 @@ PancakeSwap V3, Aerodrome Slipstream and forks nobody has written down.
 """
 import argparse, json, sys
 from collections import defaultdict
-from rpc import Client, BASE, BSC, ETH, LOG_EPS, MAX_SPAN, RangeError, s256
+from rpc import Client, BASE, BSC, ETH, LOG_EPS, ARCHIVE_EPS, MAX_SPAN, RangeError, s256
 from scan import STABLES
 from topics import T as _T
 from depth import Pool, InconsistentState, MIN_TICK, MAX_TICK
@@ -552,7 +552,7 @@ def main():
     issuers = [x.lower() for x in a.issuer]
     if a.block:
         from rpc import PinnedClient
-        cli = PinnedClient(Client(LOG_EPS[a.chain]), a.block)
+        cli = PinnedClient(Client(ARCHIVE_EPS[a.chain]), a.block)
         print(f"  pinned to #{a.block:,} (archive pool) — every read lands on this block")
     hi = cli.block_number()
     # NOT a monkeypatch. `import positions as _self` from inside `python positions.py`

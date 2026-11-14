@@ -64,6 +64,11 @@ SIG = {
     # V2 pool
     "v2.Swap":          "Swap(address,uint256,uint256,uint256,uint256,address)",
     "v2.Sync":          "Sync(uint112,uint112)",
+    # Uniswap V4 singleton PoolManager: one contract, every pool, keyed by a 32-byte
+    # poolId. The PoolKey is stored NOWHERE except this Initialize event.
+    "v4.Initialize":    "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)",
+    "v4.Swap":          "Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)",
+    "v4.ModifyLiquidity": "ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)",
     # Access control / ownership, for the privilege audit
     "ac.RoleGranted":   "RoleGranted(bytes32,address,address)",
     "ac.RoleRevoked":   "RoleRevoked(bytes32,address,address)",

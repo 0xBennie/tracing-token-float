@@ -140,11 +140,23 @@ def mine_counterparties(gcli, cli, token, head, chain, window=200_000, cap=120):
         cur = lo - 1
     found = []
     print(f"     probing the {min(cap, len(seen)):,} most frequent for a pool interface…")
-    for a, _ in seen.most_common(cap):
+    singletons = []
+    for a, n in seen.most_common(cap):
         try:
             t0 = _addr(cli.eth_call(a, SEL["token0"]))
             t1 = _addr(cli.eth_call(a, SEL["token1"]))
         except Exception:
+            # Not a pool. But a singleton manager (Uniswap V4) is not a pool either and
+            # holds every pool it hosts: one storage read through extsload() tells them
+            # apart. Missing it once hid four live pools from this enumeration and made
+            # the manager look like the biggest buyer in a pump (pitfall #37).
+            try:
+                cli.eth_call(a, TP.selector("extsload(bytes32)") + "0" * 64)
+                singletons.append((a.lower(), n))
+                print(f"       SINGLETON manager: {a}  ({n} transfers) — its pools are "
+                      f"invisible here; run v4pools.py --manager {a}")
+            except Exception:
+                pass
             continue
         if token not in (t0.lower(), t1.lower()):
             continue
@@ -155,7 +167,7 @@ def mine_counterparties(gcli, cli, token, head, chain, window=200_000, cap=120):
             pass
         found.append((a.lower(), kind, t0.lower(), t1.lower()))
         print(f"       pool-like: {a}  ({kind})")
-    return found, asked, answered, refused
+    return found, asked, answered, refused, singletons
 
 
 def main():
@@ -222,7 +234,7 @@ def main():
 
     # ---- path 2 first: mining teaches us factories the seed list lacks -------
     print("  [mining] addresses the token actually moves against…")
-    mined, ask, ans, ref = mine_counterparties(gcli, cli, token, head, a.chain)
+    mined, ask, ans, ref, singletons = mine_counterparties(gcli, cli, token, head, a.chain)
     print(f"     asked {ask} answered {ans} refused {ref}   -> {len(mined)} pool-like")
     for addr, kind, t0, t1 in mined:
         pools[addr] = {"how": "mined", "kind": kind, "t0": t0, "t1": t1}
@@ -331,19 +343,25 @@ def main():
     print(f"  Quote this beside every market figure. 'The market' means these "
           f"{len(rows)} venues and nothing else — CEX inventory is invisible here, and "
           f"so is any chain you did not scan.")
+    if singletons:
+        print(f"  !! NOT COVERED: {len(singletons)} singleton manager(s) trade this token "
+              f"({', '.join(x for x, _ in singletons)}). Their pools are outside every "
+              f"figure above — enumerate them with v4pools.py and add their depth before "
+              f"calling anything 'the market' (pitfall #37).")
     if ref:
         print(f"  !! {ref} mining window(s) refused — a venue reachable only through a "
               f"counterparty in those windows was never probed. This is a FLOOR.")
 
     if a.json:
         print("\n" + json.dumps({"token": token, "head": head, "pools": rows,
+                                  "singleton_managers": [x for x, _ in singletons],
                                  "priced_quote_usd": tot_q, "top_share_pct": top,
                                  "unpriced_pools": len(unpriced),
                                  "unread_pools": [{"pool": p_, "why": w_}
                                                   for p_, w_ in unread_pools],
                                  "mining_refused": ref}, indent=1, default=str))
     # Unpriced pools are an unknown, and an unknown is not a pass.
-    sys.exit(0 if (top >= a.min_share and not ref and not unpriced
+    sys.exit(0 if (top >= a.min_share and not ref and not unpriced and not singletons
                    and not unread_pools) else 2)
 
 

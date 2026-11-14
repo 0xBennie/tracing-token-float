@@ -783,6 +783,113 @@ belongs to its depositors; neither is dormant retail. Issuer wallets get their o
 per-wallet idle table: an issuer that has not moved a large wallet in months is a
 supply overhang, not "locked".
 
+## 35. A wall-clock time worked out by hand is a guess
+
+One report printed three dated claims on the wrong day. The method was ordinary: take
+the head block's timestamp, convert it to a date mentally, then place every event by
+`(head − block) × 0.45 s`. The block deltas were right; the mental conversion of the
+head timestamp was off by about eleven hours, and every derived time inherited it. "A
+dump on the 9th" was on the 16th, a wall that "moved at 18:36" moved at 07:55, and a
+"pre-pump deposit" landed on the wrong side of a day boundary.
+
+Every time a deliverable prints comes from the block header itself —
+`funding.py when <block>` — and is printed with its block number beside it. Never
+interpolate a time that a single RPC call would have answered, and never convert a Unix
+timestamp in your head.
+
+## 36. A custodian's housekeeping looks like a holder's move
+
+Two shapes recur, and both were misread in the same audit:
+
+- **Wallet rotation.** An exchange moving its whole inventory to a new wallet emits, for
+  each token, one large transfer from the old address to the new one. Seen in one
+  token's ledger it reads as "tens of millions deposited to an exchange two days before
+  the pump". Seen across tokens it is dozens of distinct tokens to one destination
+  inside hours. `funding.py migration` counts exactly that before any "deposit" claim
+  ships; the old and new addresses then belong to one custody bucket, not two.
+- **The custodian's gas payer.** An address that tops up deposit addresses for an
+  exchange funds the issuer's wallets and everyone else's alike. A shared first gas
+  funder with a nonce in the millions is a WEAK signal — the same exchange account
+  batch-withdrawing to fresh wallets at best — never a link. `funding.py gas` prints the
+  funder's nonce and says so.
+
+The L3 tests (nonce and native balance, activity predating the token, shared gas funder,
+multi-token migration) are listed in SKILL.md; this entry exists because listing them
+did not make anyone run them. Run them, and check `labels.py` first: both addresses
+above were already known from an earlier audit.
+
+## 37. A singleton manager is not a counterparty
+
+Uniswap V4 keeps every pool inside one PoolManager; PancakeSwap Infinity keeps its pools'
+tokens in one Vault. Neither is a pool contract, so a factory sweep never finds their
+pools and a counterparty probe for `token0()/slot0()` gets nothing back — the token's
+counterparty is the manager. In one audit that hid four live pools from venue
+enumeration, and the manager itself topped the "net buyers during the pump" table: it
+was receiving the token because people were SELLING into V4 pools.
+
+- `venues.py` now probes every frequent non-pool counterparty for `extsload(bytes32)`
+  and prints `SINGLETON manager … run v4pools.py`.
+- `v4pools.py` finds the poolIds that actually hold the token (Swap amounts matched to
+  the token's delta on the manager, which filters out multi-hop pools that never touch
+  it), recovers each PoolKey from its Initialize event, and proves it by hashing.
+- A singleton's ERC-20 balance is every pool's reserve at once (SKILL.md, "Endpoint and venue notes"): never one pool's depth.
+- Fold singletons out of any buyer/seller ranking, exactly like routers (pitfall #30).
+
+## 38. A spent quota is not a rate limit
+
+A free public key can have a usage allowance as well as a concurrency ceiling. A full
+replay on one such key spent it; every later call answered "maximum API usage limit" for
+a while, and the backoff logic built for rate limits (pitfall #24) kept retrying into a
+wall. The work finished on hand-written wrappers that monkeypatched the endpoint lists —
+which were then the only record of which provider answered which range.
+
+- Every pool is now replaceable from the environment, no code edits:
+  `TTF_RPC_<GENERAL|LOGS|ARCHIVE|XCHECK>_<CHAIN>` and `TTF_SPAN_<CHAIN>`. The override is
+  printed at start, so the run log names the provider.
+- Past-block `eth_call` has its own pool (`ARCHIVE_EPS`): it is a different capability
+  from historical logs, and spending the log key's quota on pinned reads is how the
+  replay ran dry. `depth.py --block` used the pruned general pool and could not pin at
+  all; it now reads through the archive pool.
+- Know each provider's window. A recent-only log provider can be an order of magnitude
+  faster inside its rolling window (about three weeks on the one measured) and answer
+  `header not found` below it: put a replay's TAIL segment there and the history on the
+  full-archive key.
+- A range refusal that the caller then split is not a refusal; the census counts it as
+  `split-and-retried`, and only a window still too large at one block is booked refused.
+
+## 39. Liquidity at a price nobody will reach is decoration
+
+A pool showed about one and a half million dollars of liquidity. Most of the quote side
+was one position whose whole range sat below a ten-millionth of the price: a bid that
+pays only if the token goes to zero. It inflated every TVL display and absorbed none of
+any realistic sale. The quote in it was the issuer's own sell-ladder proceeds, withdrawn
+and re-parked minutes later.
+
+- Classify every quote-holding position by distance from spot. Report the spot-exit
+  ceiling twice: the whole book, and the book without positions beyond the price any
+  sale of interest could reach. Quote the second as the number that matters.
+- Trace where such a position's quote came from (an archive `balanceOf` bisect on the
+  owner finds the block in one pass): withdrawn from the same pool is the issuer's sale
+  proceeds, not new money.
+- Bid decoration is the mirror of the sell ladder (pitfall #21): one adds no depth to
+  buyers, the other none to sellers, and both are one transaction from disappearing.
+
+## 40. A token-only ledger sees half of every trade
+
+The replay database holds the token's transfers and nothing else. The decisive evidence
+in one audit lived on the quote side: an issuer dump's stablecoin proceeds landing in a
+single wallet together with exchange withdrawals made in the same hour (the issuer was
+selling on chain and on an exchange at once), and the "dip buyers" each funded with a
+round million minutes before they bought. None of it is visible in token flows.
+
+- For every episode that matters, run `funding.py quote` on the actors: where the quote
+  asset came from before a buy and where it went after a sale.
+- Round-number funding just before a burst of buying, from a fresh intermediary, is the
+  shape of a prepared buyer; it is still a sieve (pitfall #19) until a chain closes
+  without a custodian in the middle.
+- Zero-value rows from look-alike addresses pollute quote flows exactly as they pollute
+  token lineage (pitfall #33); `funding.py quote` drops them.
+
 ## Quick self-checks
 
 | Check | Passes when |
@@ -818,3 +925,11 @@ supply overhang, not "locked".
 | Wei arithmetic | Every published figure summed with `int()` over raw wei; string-sliced values used only for ranking, and labelled as such |
 | Refusals counted | Windows answered vs. windows asked printed; no refusal folded into "empty" |
 | Market-maker bucket | Test-transfer, pre-pool-arrival and return-to-treasury all checked before any desk is called independent |
+| Times | Every printed time read from the block header (`funding.py when`) and printed beside its block number |
+| Custodian housekeeping | Any large move involving a custody-shaped address checked with `funding.py migration`; any shared gas funder's nonce printed |
+| Singleton venues | Frequent non-pool counterparties probed for `extsload`; V4 pools enumerated with `v4pools.py`; managers folded out of buyer/seller tables |
+| Providers | Endpoint overrides printed in the run log; pinned reads through the archive pool; census `refused` excludes successful splits |
+| Unreachable quote | Quote parked beyond any realistic sale reported apart from the spot-exit ceiling, with its source traced |
+| Quote side | Every decisive episode followed in the quote asset as well as the token |
+| Labels | `labels.py show` run on every large unlabelled counterparty before it is classified |
+| Deliverable | `report.py check` passes and the report was built with `report.py build` |

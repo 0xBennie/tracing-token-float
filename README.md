@@ -82,8 +82,10 @@ L8  Close         two independent totals            → gate: they agree, residu
 tracing-token-float/
   SKILL.md                  the method, the tiers, the discipline
   references/
-    pitfalls.md             34 traps that corrupt results while every number still looks fine
+    pitfalls.md             40 traps that corrupt results while every number still looks fine
     v3-depth.md             concentrated-liquidity math and the depth simulator
+    labels-bsc.json         shared infrastructure / custodian labels — hints, re-verified live
+  assets/report/            the fixed report shape: head.html, print.html, skeleton.html
   scripts/
     selftest.py             checks the skill against itself — derived constants, runbook
                             commands, pitfall numbering, README counts. No network.
@@ -91,14 +93,16 @@ tracing-token-float/
                             SPOT EXIT only; see positions.py for the other two)
     privileges.py           selector extraction from bytecode + live-control proof,
                             naming whichever getter holds each gate
-    rpc.py                  rotating JSON-RPC; separate endpoint pools for historical logs
-    replay.py               parallel event replay into SQLite + the coverage and supply gates
+    rpc.py                  rotating JSON-RPC; separate pools for general / historical logs /
+                            archive eth_call, each overridable via TTF_RPC_* env
+    replay.py               parallel event replay into SQLite + the coverage and supply gates;
+                            --resolve-suspects settles round-count windows
     balances.py             exact rebuild, and the float denominator that closes in wei
     control.py              Safe signer intersection, effective lock, cross-chain supply
     positions.py            V3 liquidity attributed to owners, and the three exit numbers:
                             spot, post-withdrawal counterfactual, and who can withdraw
     attribute.py            the tier table, the closure gate, and the re-audit diff
-    lineage.py              weighted provenance, net-flow, first-funder
+    lineage.py              weighted provenance, net-flow, first-funder, forward closure
     depth.py                V3 profile, structural identities, sell simulator (both directions),
                             excluding() for the post-withdrawal counterfactual, and the
                             Pancake Infinity / Uniswap V4 singleton-pool readers
@@ -106,7 +110,13 @@ tracing-token-float/
                             unfiltered census and the Mint==0-while-Burn>0 check
     poolflow.py             window event census, Swap-only flow, and the closing identity
     venues.py               every venue the token trades on: factory sweep + counterparty
-                            mining, factories round-trip verified and learned
+                            mining, factories round-trip verified and learned; flags
+                            singleton managers
+    v4pools.py              Uniswap V4 pools holding the token, PoolKeys recovered and proved
+    funding.py              block <-> UTC, first gas funder (custodial-scale flagged),
+                            quote-asset flow, multi-token wallet rotations
+    labels.py               look up shared labels, re-check code/nonce live, emit terminals
+    report.py               the deliverable: skeleton, required-part check, HTML + print + PDF
 ```
 
 ## Install

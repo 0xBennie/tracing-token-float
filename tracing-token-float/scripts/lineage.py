@@ -101,6 +101,45 @@ def balance_exact(cur, a, table="transfers"):
     return i - o
 
 
+def closure(cur, roots, terminals, thresh=0.95, max_hop=12, table="transfers"):
+    """Forward issuer-lineage set: an address joins when >= `thresh` of its non-zero
+    inflow came from the set, and it is not a terminal (venue, custodian, router).
+    Iterated to a fixpoint. Returns (members, hop_of, inflow, outflow).
+
+    The complement of trace(): trace asks "where did THIS balance come from", closure
+    asks "where did the ISSUER's tokens go, and how much of them still sits still".
+    It is a SIEVE (pitfall #19). It sweeps airdrop recipients in at hop two — thousands
+    of addresses that are lineage-traced and not issuer-controlled — so read members by
+    balance, and never publish the member count as "issuer wallets".
+    """
+    roots = {r.lower() for r in roots}
+    term = {t.lower() for t in terminals}
+    inflow = collections.defaultdict(collections.Counter)
+    for f, d, v in cur.execute(f"SELECT frm, dst, SUM(CAST(val AS REAL)) FROM {table} "
+                               f"WHERE CAST(val AS REAL) > 0 GROUP BY frm, dst"):
+        inflow[d][f] += v / WEI
+    outflow = collections.defaultdict(collections.Counter)
+    for d, c in inflow.items():
+        for f, v in c.items():
+            outflow[f][d] += v
+    zero = "0x" + "0" * 40
+    S, hop, frontier = set(roots), {r: 0 for r in roots}, set(roots)
+    for h in range(1, max_hop + 1):
+        cand = set().union(*(outflow[a].keys() for a in frontier)) - S - term - {zero}
+        new = set()
+        for d in cand:
+            tot = sum(inflow[d].values())
+            if tot and sum(v for f, v in inflow[d].items() if f in S) / tot >= thresh:
+                new.add(d)
+        if not new:
+            break
+        for d in new:
+            hop[d] = h
+        S |= new
+        frontier = new
+    return S, hop, inflow, outflow
+
+
 if __name__ == "__main__":
     import argparse, json, sqlite3, sys
     sys.stdout.reconfigure(line_buffering=True)
@@ -125,6 +164,13 @@ if __name__ == "__main__":
     b = sub.add_parser("balance", help="exact wei balance from the replayed ledger")
     b.add_argument("address")
 
+    c = sub.add_parser("closure", help="forward issuer-lineage set and where it sent tokens")
+    c.add_argument("--roots", required=True, help="comma-separated issuer addresses")
+    c.add_argument("--terminals", required=True,
+                   help="JSON {addr: class}: venues, custodians, routers — never absorbed")
+    c.add_argument("--thresh", type=float, default=0.95)
+    c.add_argument("--min-balance", type=float, default=100_000)
+
     a = p.parse_args()
     cur = sqlite3.connect(a.db).cursor()
 
@@ -144,6 +190,34 @@ if __name__ == "__main__":
             print("     churn. Weighted lineage does not apply to an actively trading")
             print("     address — use net-flow against known issuer addresses, the")
             print("     first-funding transfer, or timing evidence instead.")
+    elif a.cmd == "closure":
+        try:
+            terms = json.loads(a.terminals)
+        except json.JSONDecodeError:
+            terms = json.load(open(a.terminals))
+        terms = {k.lower(): v for k, v in terms.items()}
+        S, hop, inflow, outflow = closure(cur, a.roots.split(","), terms, a.thresh,
+                                          table=a.table)
+        bal = {}
+        for d, cc in inflow.items():
+            bal[d] = bal.get(d, 0) + sum(cc.values())
+        for f, cc in outflow.items():
+            bal[f] = bal.get(f, 0) - sum(cc.values())
+        held = sum(bal.get(x, 0) for x in S)
+        print(f"  closure (>= {a.thresh:.0%} of inflow from the set): {len(S):,} addresses, "
+              f"holding {held:,.0f} now")
+        ext = collections.Counter()
+        for x in S:
+            for d, v in outflow[x].items():
+                if d not in S:
+                    ext[terms.get(d, "other")] += v
+        print("  sent outside the set, by destination class:")
+        for k, v in ext.most_common():
+            print(f"     {k:<14} {v:>18,.0f}")
+        print(f"  members holding >= {a.min_balance:,.0f}:")
+        for x in sorted(S, key=lambda y: -bal.get(y, 0)):
+            if bal.get(x, 0) >= a.min_balance:
+                print(f"     hop{hop[x]}  {x}  {bal[x]:>16,.0f}")
     elif a.cmd == "netflow":
         print(json.dumps(net_flow(cur, a.a.lower(), a.b.lower(), a.table), indent=1))
     elif a.cmd == "funder":

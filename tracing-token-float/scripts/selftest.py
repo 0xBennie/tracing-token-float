@@ -326,6 +326,48 @@ def check_exact_figures():
                                   f"add it to _CONSTANTS if it is a protocol constant")
 
 
+def check_labels_and_report():
+    """Shared labels parse and stay infrastructure-only; the report shape is complete.
+
+    labels-*.json is read by every audit, so a malformed entry or an issuer address in
+    it breaks or contaminates all of them. The report skeleton must carry every part
+    report.py check demands, or `new` would hand out a body that can never pass.
+    """
+    import json as _json
+    for p in sorted((ROOT / "references").glob("labels-*.json")):
+        try:
+            d = _json.loads(p.read_text())
+        except ValueError as e:
+            fail("labels", f"{p.name} is not valid JSON: {e}")
+            continue
+        for k, v in d.items():
+            if k.startswith("_"):
+                continue
+            if not re.fullmatch(r"0x[0-9a-f]{40}", k):
+                fail("labels", f"{p.name}: key {k!r} is not a lower-case 20-byte address")
+            miss = {"label", "class", "confidence", "evidence", "verify"} - set(v)
+            if miss:
+                fail("labels", f"{p.name}: {k} lacks {sorted(miss)}")
+            if v.get("class") not in ("custodian", "venue", "router", "burn", "infra"):
+                fail("labels", f"{p.name}: {k} class {v.get('class')!r} — issuers and market "
+                               f"makers do not belong in a shared file")
+    assets = ROOT / "assets" / "report"
+    for f in ("head.html", "print.html", "skeleton.html"):
+        if not (assets / f).exists():
+            fail("report", f"assets/report/{f} missing")
+    if (assets / "skeleton.html").exists():
+        import importlib.util as _u
+        spec = _u.spec_from_file_location("report", SCRIPTS / "report.py")
+        rep = _u.module_from_spec(spec)
+        spec.loader.exec_module(rep)
+        sk = (assets / "skeleton.html").read_text()
+        for name, rx in rep.REQUIRED:
+            if name in ("snapshot block number", "UTC timestamp"):
+                continue                      # filled per audit, placeholders in the skeleton
+            if not re.search(rx, sk, re.S):
+                fail("report", f"skeleton.html lacks required part: {name}")
+
+
 def check_syntax():
     for p in sorted(SCRIPTS.glob("*.py")):
         try:
@@ -344,6 +386,7 @@ def main():
     check_readme(n or 0)
     check_retracted_wording()
     check_exact_figures()
+    check_labels_and_report()
 
     for m in NOTE:
         print(f"  note: {m}")

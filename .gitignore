@@ -6,3 +6,4 @@ __pycache__/
 # 未脱敏的审计原件：点名真实项目、含权限指控。本地保留，不进仓库。
 # 开源前另见 README「Before making this public」。
 case-study/
+.pytest_cache/

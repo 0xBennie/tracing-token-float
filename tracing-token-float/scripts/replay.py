@@ -33,7 +33,7 @@ percentage wrong. The endpoints were pruned and answered historical queries with
 """
 import argparse, sqlite3, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
-from rpc import Client, LOG_EPS, MAX_SPAN, RangeError
+from rpc import Client, LOG_EPS, MAX_SPAN, RangeError, refuse
 
 from topics import T as _T
 TRANSFER = _T["erc20.Transfer"]   # derived, never typed
@@ -44,6 +44,9 @@ TOTAL_SUPPLY = "0x18160ddd"
 # cap (blxrbdn at 2,000 on BSC) fails 100% of the time at exactly 30s.
 
 _lock = threading.Lock()
+
+# Result counts that are a node's silent truncation cap far more often than a fact.
+SUSPECT_CAPS = {1000, 2000, 5000, 10000, 20000}
 
 
 def setup(db):
@@ -100,8 +103,7 @@ def coverage(c, lo, hi):
         gaps.append((cur, hi))
     # A window whose log count lands exactly on a round number is the signature of a
     # node result cap: the response was truncated and returned without an error.
-    caps = {1000, 2000, 5000, 10000, 10_000, 20000}
-    suspect = [(a, b, n) for a, b, n in rows if n in caps]
+    suspect = [(a, b, n) for a, b, n in rows if n in SUSPECT_CAPS]
     return gaps, cov, suspect
 
 
@@ -221,7 +223,13 @@ def scan(cli, db, token, lo, hi, span=2000, workers=4):
     """
     c = setup(db)
     c.execute("INSERT OR REPLACE INTO meta VALUES('token',?)", (token,))
-    c.execute("INSERT OR REPLACE INTO meta VALUES('from_block',?)", (str(lo),))
+    # Bounds only ever WIDEN. An increment (--from-block just above the old head) used
+    # to overwrite from_block, and --verify then certified only the increment: the
+    # whole earlier history silently left the coverage gate. A gap between the old
+    # head and this lo now shows up as a gap, which is what it is.
+    prev_lo = meta_get(c, "from_block")
+    c.execute("INSERT OR REPLACE INTO meta VALUES('from_block',?)",
+              (str(min(lo, int(prev_lo))) if prev_lo else str(lo),))
     prev_hi = meta_get(c, "to_block")
     new_hi = max(hi, int(prev_hi)) if prev_hi else hi
     c.execute("INSERT OR REPLACE INTO meta VALUES('to_block',?)", (str(new_hi),))
@@ -250,6 +258,7 @@ def scan(cli, db, token, lo, hi, span=2000, workers=4):
                 mid = (wlo + whi) // 2
                 work((wlo, mid)); work((mid + 1, whi))
                 return
+            refuse("eth_getLogs")        # one block still too large: a real refusal
             rows = None
         except Exception as e:
             with _lock:
@@ -286,6 +295,64 @@ def scan(cli, db, token, lo, hi, span=2000, workers=4):
     return stats["rows"]
 
 
+def resolve_suspects(db, cli, pieces=10):
+    """Settle every truncation suspect instead of leaving the database uncertifiable.
+
+    A window that returned exactly a round count is re-fetched in `pieces` sub-windows.
+    The finer answer either matches the stored (tx, logIndex) set exactly — the round
+    count was a coincidence, and the suspect row is replaced by the sub-window rows in
+    one transaction — or it holds rows the database lacks, which is a truncation caught:
+    those rows are inserted and the row is replaced too. A sub-window that itself lands
+    on a cap is not trusted and the suspect is left in place for a finer run.
+
+    Run it with the cross-check pool as well when the window is recent enough
+    (TTF_RPC_LOGS_<CHAIN> pointed at XCHECK_EPS): a second provider agreeing is the only
+    evidence of the window's content that does not come from the provider that produced
+    the suspicion. Three suspects across one long replay were all coincidences; that is
+    a base rate, not a licence to skip the check.
+    """
+    c = setup(db)
+    token = meta_get(c, "token")
+    rows = list(c.execute("SELECT lo, hi, n FROM ranges_done WHERE n IN (%s)"
+                          % ",".join("?" * len(SUSPECT_CAPS)), sorted(SUSPECT_CAPS)))
+    if not rows:
+        print("  no truncation suspects")
+        return 0
+    left = 0
+    for lo, hi, n in rows:
+        have = {(t, li) for t, li in c.execute(
+            "SELECT tx, li FROM transfers WHERE block BETWEEN ? AND ?", (lo, hi))}
+        step = max(1, (hi - lo + 1) // pieces)
+        sub, got, new_rows, capped = [], set(), [], False
+        for a in range(lo, hi + 1, step):
+            b = min(a + step - 1, hi)
+            rr = fetch_window(cli, token, a, b)
+            if len(rr) in SUSPECT_CAPS:
+                capped = True
+            sub.append((a, b, len(rr)))
+            for r in rr:
+                got.add((r[1], r[2]))
+                if (r[1], r[2]) not in have:
+                    new_rows.append(r)
+        extra = have - got
+        if capped or extra:
+            left += 1
+            why = "a sub-window also hit a cap" if capped else \
+                  f"{len(extra)} stored row(s) absent from the finer answer"
+            print(f"  #{lo:,}-#{hi:,} n={n:,}: NOT resolved ({why}) — kept as a suspect")
+            continue
+        with c:
+            if new_rows:
+                c.executemany("INSERT OR IGNORE INTO transfers VALUES(?,?,?,?,?,?)", new_rows)
+            c.execute("DELETE FROM ranges_done WHERE lo=?", (lo,))
+            c.executemany("INSERT OR REPLACE INTO ranges_done VALUES(?,?,?,?)",
+                          [(a, b, k, int(time.time())) for a, b, k in sub])
+        verdict = (f"TRUNCATION CAUGHT — {len(new_rows):,} missing row(s) inserted"
+                   if new_rows else "identical, a coincidence")
+        print(f"  #{lo:,}-#{hi:,} n={n:,}: {len(sub)} sub-windows, {len(got):,} rows — {verdict}")
+    return 1 if left else 0
+
+
 def verify(db, cli=None):
     """The gate. Coverage first, then the supply identity. Integer arithmetic only."""
     c = setup(db)
@@ -315,6 +382,7 @@ def verify(db, cli=None):
               f"result count — likely a silent node cap:")
         for a, b, n in suspect[:5]:
             print(f"      #{a:,}–#{b:,} returned exactly {n:,} logs")
+        print("    -> settle them: replay.py --db <db> --rpc <chain> --resolve-suspects")
         ok = False
     if gaps:
         print("    -> re-run replay.py with the same --db to fill them. Do NOT compute")
@@ -395,6 +463,10 @@ if __name__ == "__main__":
                         "scan's own first one — REQUIRED for a segment that starts before "
                         "the token's first Transfer. Pick a window known to hold this "
                         "token's logs, ideally its earliest (the mint)")
+    p.add_argument("--resolve-suspects", action="store_true",
+                   help="re-fetch every window that returned a round result count in ten "
+                        "sub-windows and settle it (coincidence or truncation) before "
+                        "--verify. Needs --rpc")
     p.add_argument("--verify", action="store_true")
     a = p.parse_args()
 
@@ -437,5 +509,11 @@ if __name__ == "__main__":
                   f"everything below it is empty anyway; otherwise qualify lower.",
                   file=sys.stderr, flush=True)
         scan(cli, a.db, tok, a.from_block, hi, span, a.workers)
+    if a.resolve_suspects:
+        if not cli:
+            sys.exit("--resolve-suspects needs --rpc")
+        rc = resolve_suspects(a.db, cli)
+        if rc and not a.verify:
+            sys.exit(rc)
     if a.verify:
         sys.exit(verify(a.db, cli))

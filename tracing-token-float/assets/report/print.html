@@ -1,0 +1,48 @@
+<style>
+@media print{
+  @page{ size:A4 portrait; margin:13mm 10mm 14mm; }
+  :root{
+    --bg:#ffffff; --surface:#ffffff; --surface-2:#f2f2ee; --line:#dcdad2; --line-2:#b9b6aa;
+    --ink:#141512; --ink-2:#44463f; --ink-3:#6c6e64;
+    --c1:#00897B; --c2:#C85A12; --c3:#4150C8; --c4:#AD2166; --c5:#71800E;
+    --risk:#9C2D18; --risk-bg:#f8ece8; --ok:#3F6B2B;
+  }
+  html,body{ background:#fff !important; }
+  body{ font-size:10px; line-height:1.55; padding-block:0; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .wrap{ max-width:none; padding-inline:0; }
+  p{ max-width:none; }
+  .lede{ font-size:11px; }
+  .sub{ font-size:11.5px; }
+  h1{ font-size:30px; }
+  h2{ font-size:17px; }
+  h3{ font-size:12px; }
+  header.masthead{ padding-block:0 14px; }
+  section{ padding-block:16px; }
+  .scroll{ overflow:visible !important; }
+  table{ font-size:8.4px; table-layout:auto; width:100%; }
+  th,td{ padding:3.5px 5px; overflow-wrap:anywhere; }
+  caption{ font-size:8.5px; }
+  .tiles{ grid-template-columns:repeat(3,1fr); }
+  .tile .v{ font-size:19px; }
+  .tile .n{ font-size:9px; }
+  .stamp{ font-size:10px; }
+  .heads li{ padding:9px 0 9px 38px; }
+  .heads li::before{ width:22px; height:22px; font-size:10px; top:10px; }
+  .chain{ font-size:9.5px; }
+  .chain .node .lbl{ font-size:11.5px; }
+  .legend{ font-size:9.5px; }
+  figcaption{ font-size:8.8px; }
+  .foot{ font-size:9px; }
+  ul.tight{ max-width:none; }
+  ul.tight li{ margin-bottom:4px; }
+  .tip{ display:none !important; }
+  h1,h2,h3{ break-after:avoid; page-break-after:avoid; }
+  figure,.callout,.chain,.stamp,.tiles,.tile{ break-inside:avoid; page-break-inside:avoid; }
+  tr,.heads li{ break-inside:avoid; page-break-inside:avoid; }
+  thead{ display:table-header-group; }
+  section{ break-before:auto; }
+  a{ text-decoration:none; }
+}
+</style>
+<script>try{document.documentElement.setAttribute("data-theme","light");}catch(e){}</script>
+

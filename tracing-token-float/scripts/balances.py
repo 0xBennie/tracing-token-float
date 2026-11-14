@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Rebuild balances exactly, and get the DENOMINATOR right.
 
-    python balances.py --db o.db --at-block 50707679 --supply 1e9 \
-        --exclude 0xc1b5...:seed:vesting --exclude 0xc866...:team:vesting --top 20
+    python balances.py --db case.db --at-block <BLOCK> --supply 1e9 \
+        --exclude 0x<SEED>:seed:vesting --exclude 0x<TEAM>:team:vesting --top 20
     python balances.py --db a.db --supply 1e9 --reconcile b.db
 
 Pitfall #1 — locked supply in the numerator, total supply in the denominator — is the
@@ -131,8 +131,8 @@ def _provenance(c):
     """(coverage table, lo, hi, where the bounds came from), with a shim view installed.
 
     Three databases in this skill's own corpus spell the coverage table three ways:
-    ranges_done(lo,hi,n,ts) from replay.py, ranges_done(a,b,n) in o.db, done(lo,hi,n) in
-    aiw3.db. A TEMP VIEW shadows the name for unqualified lookups so replay.coverage()
+    ranges_done(lo,hi,n,ts) from replay.py, ranges_done(a,b,n) in one case database, done(lo,hi,n) in
+    another. A TEMP VIEW shadows the name for unqualified lookups so replay.coverage()
     runs UNMODIFIED — the gate that ships with the skill is the gate that runs, with no
     second copy of it here to drift out of step.
     """
@@ -302,7 +302,7 @@ def _stamp(c, kv):
 
 def save(db, bal, supply_wei, float_wei=None, decimals=18, pct_denominator="supply",
          at_block=None, force=False):
-    """Persist to the `balances` schema already in o.db and aiw3.db.
+    """Persist to the `balances` schema already used by earlier case databases.
 
     `raw` (wei, TEXT) is authoritative. `tokens` and `pct` are display floats and must
     never be summed — pitfall #2. `pct` needs a denominator that the column itself

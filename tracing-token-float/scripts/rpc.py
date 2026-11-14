@@ -8,7 +8,7 @@ call, retry with backoff, and keep batches at or below ~120 items.
     c.eth_call(token, "0x18160ddd")                       # totalSupply
     c.batch([("eth_call", [{"to": p, "data": d}, "latest"]) for d in datas])
 """
-import atexit, collections, itertools, re, sys, time, requests
+import atexit, collections, itertools, os, re, sys, time, requests
 
 # Two pools, because they are two different capabilities. Most public nodes serve
 # eth_call at `latest` happily and are PRUNED for historical eth_getLogs — and a
@@ -43,9 +43,20 @@ LOG_EPS = {
     #   a 10M-transfer replay is an hours-long job however you slice it.
     #
     # This REPLACES an earlier claim in this file that blxrbdn was the only free BSC
-    # endpoint serving bulk historical getLogs. It was not, and worse, blxrbdn has an
-    # archive floor around block 66M (2025-10-19) — it cannot serve a token deployed
-    # before that date at all, which is most of them. It stays in XCHECK_EPS below.
+    # endpoint serving bulk historical getLogs. It was not. blxrbdn's floor is not a
+    # fixed block either: it is a ROLLING window of roughly four million blocks behind
+    # head (about three weeks at 0.45 s), answering `header not found` below it. Inside
+    # the window it is an order of magnitude faster than nodereal — 2,000-block spans,
+    # six workers, no throttling — so a replay's TAIL segment belongs on it:
+    #     TTF_RPC_LOGS_BSC=https://bsc.rpc.blxrbdn.com python replay.py ... \
+    #         --from-block <head - 4,000,000> --span 2000 --db same.db
+    # Bisect its current floor before relying on it; it moves every block.
+    #
+    # nodereal's PUBLIC key also has a usage QUOTA, not only a concurrency ceiling: a
+    # full replay can exhaust it, after which every call returns "maximum API usage
+    # limit of public" for a while. Backing off does not fix a spent quota. Switch the
+    # pool (TTF_RPC_* below) for whatever is left: blxrbdn for recent logs, blastapi
+    # for archive eth_call.
     #
     # NOTE bsc.publicnode.com and bsc-rpc.publicnode.com are ONE backend, not two
     # sources, and both 403 on anything historical. blastapi and zan.top are true
@@ -56,7 +67,21 @@ LOG_EPS = {
     # mainnet.base.org is a true archive but has a response-SIZE cap, so it rejects a
     # dense 200-block window while serving a quiet 5,000-block one — it says so loudly.
     "base": ["https://base.drpc.org", "https://mainnet.base.org"],
-    "eth":  ETH,
+    "eth":  list(ETH),      # a COPY: overriding the log pool must not move the general one
+}
+
+# State at a PAST block — eth_call / eth_getBalance / eth_getStorageAt pinned to a
+# snapshot. A different capability from both pools above: the general pool is pruned
+# (state older than ~128 blocks comes back "missing trie node"), and the log pool's
+# quota is better spent on logs. blastapi's free tier is a true archive for eth_call
+# (qualified on contract code at block 10M) while refusing eth_getLogs entirely, which
+# is exactly the split this dict exists for. depth.py --block and positions.py --block
+# read through this pool.
+ARCHIVE_EPS = {
+    "bsc":  ["https://bsc-mainnet.public.blastapi.io",
+             "https://bsc-mainnet.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3"],
+    "base": ["https://mainnet.base.org", "https://base.drpc.org"],
+    "eth":  list(ETH),
 }
 
 # A SECOND, independent provider per chain, for the one job that cannot be done with a
@@ -67,12 +92,46 @@ LOG_EPS = {
 # blxrbdn on every window ever tested, which is exactly what a cross-check needs.
 XCHECK_EPS = {"bsc": ["https://bsc.rpc.blxrbdn.com", "https://bsc.blockrazor.xyz"]}
 
+
+# Every pool can be replaced from the environment without editing this file:
+#     TTF_RPC_<GENERAL|LOGS|ARCHIVE|XCHECK>_<BSC|BASE|ETH>="url1,url2"
+#     TTF_SPAN_<BSC|BASE|ETH>=2000      (the log window that pool serves)
+# Applied once, at import, IN PLACE — scripts that did `from rpc import BSC` hold the
+# same list object and see the change. An analysis that ran out of a provider's quota
+# used to finish on hand-written wrappers that monkeypatched this module; those
+# wrappers were the only record of which provider answered which range.
+_POOLS = {"GENERAL": {"bsc": BSC, "base": BASE, "eth": ETH}, "LOGS": LOG_EPS,
+          "ARCHIVE": ARCHIVE_EPS, "XCHECK": XCHECK_EPS}
+
+
+def _apply_env():
+    for kind, table in _POOLS.items():
+        for chain in ("bsc", "base", "eth"):
+            raw = os.environ.get(f"TTF_RPC_{kind}_{chain.upper()}")
+            if not raw:
+                continue
+            urls = [u.strip() for u in raw.split(",") if u.strip()]
+            if chain in table:
+                table[chain][:] = urls
+            else:
+                table[chain] = urls
+            print(f"  rpc: {kind.lower()} pool for {chain} taken from "
+                  f"TTF_RPC_{kind}_{chain.upper()} ({len(urls)} endpoint(s))", file=sys.stderr)
+    for chain in ("bsc", "base", "eth"):
+        raw = os.environ.get(f"TTF_SPAN_{chain.upper()}")
+        if raw:
+            MAX_SPAN[chain] = int(raw.replace(",", "").replace("_", ""))
+            print(f"  rpc: log window for {chain} set to {MAX_SPAN[chain]:,} blocks by "
+                  f"TTF_SPAN_{chain.upper()}", file=sys.stderr)
+
 # Largest eth_getLogs window each pool will actually serve. Exceeding it does not
 # degrade gracefully; it times out or truncates.
 # bsc 20,000 and not nodereal's 50,000 block ceiling: on dense history a 50,000-block
 # window trips the 50,000-RESULT cap instead, and each trip costs a bisection. 20,000
 # stayed under both caps across a 3,058-window replay.
 MAX_SPAN = {"bsc": 20000, "base": 2000, "eth": 2000}
+
+_apply_env()     # after MAX_SPAN, which it may also override
 
 # Endpoints that answer eth_blockNumber happily and can never serve logs. Matching these
 # evicts the endpoint from rotation instead of burning every retry on it — and, more
@@ -116,6 +175,10 @@ RATE_SIGNS = ("rate limit", "too many request", "429", "capacity", "throttl",
               # A throttle phrased as a count per unit time ("exceeds limit of 25 requests
               # per second") would otherwise read as the Infura range cap above.
               "per second", "per minute", "requests per")
+# The subset of RATE_SIGNS that means the allowance is SPENT rather than momentarily
+# exceeded. Still classified "rate" (a short wait does sometimes get one through), but
+# a call that ends on one of these says so, because the remedy is a different pool.
+QUOTA_SIGNS = ("usage limit of public", "reached the maximum api", "quota")
 
 
 def _has(msg, signs):
@@ -218,6 +281,11 @@ class Census:
         self.refused = collections.Counter()
         self.empty = collections.Counter()
         self.reverted = collections.Counter()
+        # A range refusal asks the CALLER to split the window; the question is then
+        # answered by the halves. Booking it as `refused` made every replay report a
+        # refusal count inflated by its own successful splits. A caller that cannot
+        # split further (one block) books the genuine refusal itself via refuse().
+        self.split = collections.Counter()
 
     def totals(self):
         return (sum(self.asked.values()), sum(self.answered.values()),
@@ -228,12 +296,21 @@ class Census:
 
     def line(self):
         a, k, r, e = self.totals()
+        sp = sum(self.split.values())
         return (f"RPC CENSUS  asked {a:,}  answered {k:,}  refused {r:,} "
                 f"({(r / a * 100 if a else 0):.1f}%)  empty-but-answered {e:,}  "
-                f"reverted-by-chain {self.reverts():,}")
+                f"reverted-by-chain {self.reverts():,}"
+                + (f"  split-and-retried {sp:,}" if sp else ""))
 
 
 CENSUS = Census()
+
+
+def refuse(method="eth_getLogs"):
+    """Book a refusal the transport could not see: a range that stayed too large at a
+    single block, so the caller gave up instead of splitting."""
+    CENSUS.asked[method] += 1
+    CENSUS.refused[method] += 1
 
 
 def _print_census():
@@ -323,7 +400,7 @@ class Client:
                         raise PrunedStateError(
                             f"{method} asked a pruned node for historical state "
                             f"({j['error']}). Use an archive pool such as "
-                            f"Client(LOG_EPS[chain]); retrying will not help.")
+                            f"Client(ARCHIVE_EPS[chain]); retrying will not help.")
                     if kind == "revert":
                         # The chain answered. Every other endpoint will answer the same,
                         # so stop here instead of burning the rotation on it.
@@ -348,10 +425,16 @@ class Client:
         # redact(): `last` carries the endpoint URL and whatever the transport said,
         # and requests puts the full URL — key included — into its own messages too.
         if rng and rng >= min(tries, len(self.endpoints)):
-            CENSUS.refused[method] += 1
+            CENSUS.split[method] += 1
+            CENSUS.asked[method] -= 1        # the halves are the questions now
             raise RangeError(redact(f"every endpoint refused the range :: {last}"))
         CENSUS.refused[method] += 1
-        raise RuntimeError(redact(f"rpc failed [{method}] :: {last}"))
+        hint = ""
+        if last and _has(str(last).lower(), QUOTA_SIGNS):
+            hint = (" — this is a spent QUOTA, not a burst: retrying will not fix it. "
+                    "Point the pool elsewhere with TTF_RPC_<GENERAL|LOGS|ARCHIVE>_<CHAIN> "
+                    "(pitfall #38)")
+        raise RuntimeError(redact(f"rpc failed [{method}] :: {last}{hint}"))
 
     def _answered(self, method, result):
         CENSUS.answered[method] += 1

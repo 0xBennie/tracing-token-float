@@ -1,0 +1,104 @@
+<!--
+  Report body skeleton. `report.py new` copies this; `report.py check` refuses a body
+  that drops a required part; `report.py build` wraps it in head.html (+ print.html)
+  and prints the PDF. Replace every {{…}}. Delete these comments.
+
+  Rules that are not optional (each one exists because a past report broke it):
+  - Every h2 is a CONCLUSION sentence, not a topic label ("撤资后只剩 $84", not "流动性").
+  - Every time comes from a block header (funding.py when), with the block number.
+  - Every percentage names its denominator; the control figure is a RANGE (A … A+B+C).
+  - Exit liquidity is the three-number table — never one number called "liquidity".
+  - Anything retracted from an earlier version or interim message goes in 本轮被推翻的
+    我自己的说法, with what replaced it. A deliverable that hides its corrections is
+    less credible, not more.
+  - Pool state and balances are read at the SNAPSHOT block, never at latest.
+  - Case figures stay exact here (this is the deliverable); only the skill's own docs
+    round them.
+-->
+<div class="wrap">
+<header class="masthead">
+  <p class="eyebrow">链上筹码取证 · {{CHAIN}} · {{首次全量 / 第 N 次复核}}</p>
+  <h1>{{TOKEN}} 筹码追踪</h1>
+  <p class="sub">{{一段话：控盘区间、出货事实、出口深度。若撤回上一版的结论，在这里点名撤回了什么。}}</p>
+  <div class="stamp"><dl>
+    <dt>当前口径</dt><dd>{{哪些数字经过两条独立路径核对；做没做多路复核（没做就写没做）；归因记录文件名。}}</dd>
+    <dt>快照</dt><dd>{{CHAIN}} <span class="num">#{{BLOCK}}</span>，{{YYYY-MM-DD HH:MM:SS}} UTC。出块实测 {{s/块}}。所有余额、池子状态均读<b>快照块本身</b>（归档节点）。</dd>
+    <dt>现价</dt><dd><span class="num">${{PRICE}}</span>（主池 <code>sqrtPriceX96</code>，快照块）。{{对比基准与涨跌幅}}</dd>
+    <dt>数据底座</dt><dd>{{N}} 条 Transfer，部署块 #{{DEPLOY}} 至快照块，0 缺口，重建余额逐 wei 等于 <code>totalSupply()</code>，<b>CERTIFIED</b>。{{持币地址数与外部来源对照；截断嫌疑如何处理}}</dd>
+  </dl></div>
+</header>
+
+<section>
+  <p class="eyebrow">结论</p>
+  <ol class="heads">
+    <li><b>{{权限：能不能印、能不能冻结、能不能抽走}}</b>{{…}}</li>
+    <li><b>{{控盘区间 A%–A+B+C%，D/M 单列}}</b>{{…}}</li>
+    <li><b>{{出货 / 吸筹事实，带区块时间}}</b>{{…}}</li>
+    <li><b>{{出货深度：① ② ③ 三个数}}</b>{{…}}</li>
+    <li><b>{{本期最重要的新事实或撤回}}</b>{{…}}</li>
+  </ol>
+</section>
+
+<section>
+  <p class="eyebrow">01 · 合约与控制权</p>
+  <h2>{{结论句}}</h2>
+  <!-- privileges.py 结果；Safe 门限与共同签名人表 -->
+</section>
+
+<section>
+  <p class="eyebrow">02 · 控盘</p>
+  <h2>{{发行方控盘 A%–A+B+C%}}</h2>
+  <div class="scroll"><table>
+    <caption>分母 = 浮筹 {{FLOAT}} = 总量 − {{排除项}}。各层 + 未归因逐 wei 等于浮筹（attribute.py，{{runN.json}}）。</caption>
+    <thead><tr><th>编号</th><th>层</th><th>地址</th><th>数量</th><th>占浮筹</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td>A1</td><td><span class="pill a">A 可证明</span></td><td>{{}}</td><td class="n">{{}}</td><td class="n">{{}}</td><td style="text-align:left">{{}}</td></tr>
+      <tr class="sum"><td colspan="3">区间</td><td class="n">{{}}</td><td class="n">{{A%–A+B+C%}}</td><td></td></tr>
+    </tbody>
+  </table></div>
+  <!-- 交易所托管单列：余额 / 占浮筹 / 发行方净存入（存入减转回）。不归因。 -->
+</section>
+
+<section>
+  <p class="eyebrow">03 · {{出货 / 吸筹}}</p>
+  <h2>{{结论句，带日期与规模}}</h2>
+  <!-- .chain 节点链：每个节点写 区块时间 · 区块号 · 数量 -->
+</section>
+
+<section>
+  <p class="eyebrow">04 · 出货深度</p>
+  <h2>三个数，三个问题</h2>
+  <div class="scroll"><table>
+    <caption>{{池子}}，快照块重建完整流动性剖面，三条结构自检通过。单位 {{QUOTE}}。</caption>
+    <thead><tr><th>卖出（枚）</th><th>① 此刻（整个盘口）</th><th>② 发行方撤资后</th><th>③ 发行方自己卖：外部现金</th></tr></thead>
+    <tbody>
+      <tr><td class="n">{{}}</td><td class="n">{{}}</td><td class="n">{{}}</td><td class="n">{{}}</td></tr>
+    </tbody>
+  </table></div>
+  <!-- 场所表：venues.py + v4pools.py 枚举出的每个场所，写明枚举方法与覆盖率 -->
+  <p><b>一句话</b>：{{第三方此刻能卖到 X，其中 Y% 发行方一笔可撤，撤完剩 Z；控制仓位按现价约 P，是出口的 N 倍。}}</p>
+</section>
+
+<section>
+  <p class="eyebrow">05 · 核对</p>
+  <h2>每条结论的来源</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>结论</th><th>来源 1</th><th>来源 2</th></tr></thead>
+    <tbody>
+      <tr><td>数据底座完整</td><td>replay.py --verify CERTIFIED</td><td>{{balanceOf 逐 wei 抽查}}</td></tr>
+    </tbody>
+  </table></div>
+  <h3 style="margin-top:22px">本轮被推翻的我自己的说法</h3>
+  <ul class="tight">
+    <li>{{「原说法」——为什么错、现在是什么。没有就写"无"。}}</li>
+  </ul>
+</section>
+
+<section>
+  <p class="eyebrow">06 · 失效条件</p>
+  <h2>什么时候这份报告作废</h2>
+  <ul class="tight">
+    <li>{{哪个头寸被撤 / 哪个钱包转出 / 价格变动多少，就必须重算哪一节}}</li>
+  </ul>
+</section>
+</div>

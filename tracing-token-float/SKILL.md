@@ -73,9 +73,20 @@ cd scripts
 # that does not exist fails HERE instead of coming back as an empty result.
 python selftest.py
 
+# Known infrastructure first. Exchange wallets, singleton managers and custody vaults
+# recur across audits; three misreads in one audit were all already labelled elsewhere.
+python labels.py --chain bsc show 0xADDR 0xADDR2          # hint + live code/nonce re-check
+python labels.py --chain bsc terminals > terms.json       # terminals for lineage.py
+
 # L0  Replay, then certify. Two gates, and they are not the same gate.
 python replay.py --rpc bsc --token 0xTOKEN --from-block <deploy> --db t.db --workers 4
 python replay.py --db t.db --verify --rpc bsc          # exit 0 = CERTIFIED
+#   Round-count windows block certification until settled — do it, do not hand-wave:
+python replay.py --db t.db --rpc bsc --resolve-suspects --verify
+#   Out of quota, or the tail is inside a fast recent-only provider's window? Swap the
+#   pool from the environment (printed at start, so the log names the provider). The
+#   same --db fetches only what ranges_done does not already cover (pitfall #38):
+TTF_RPC_LOGS_BSC=https://bsc.rpc.blxrbdn.com TTF_SPAN_BSC=2000 python replay.py --rpc bsc --token 0xTOKEN --from-block <lo> --db t.db --workers 4
 #   exit 1 -> a range is missing or the supply identity failed. Re-run the line above;
 #             it fetches only what ranges_done does not already cover.
 #   exit 3 -> it REFUSED to certify (no bounds recorded, or no --rpc). Not a pass.
@@ -106,6 +117,17 @@ python balances.py --db t.db --supply 1000000000 \
 #   "Dead chips" / dormancy: name the definition (any / out / never-sent) and bucket
 #   issuer, exchange, vault and pool balances out before calling anything retail.
 
+# L3  Follow the money that is not the token. Times from headers, never by hand (#35);
+#     gas funders with their class (#36); the quote side of every decisive episode (#40);
+#     multi-token rotations before any "deposit" claim (#36).
+python funding.py --chain bsc when <block> <block2>
+python funding.py --chain bsc gas 0xADDR 0xADDR2
+python funding.py --chain bsc quote --quote 0xUSDT --from-block <lo> --to-block <hi> 0xADDR
+python funding.py --chain bsc migration --from-block <lo> --to-block <hi> 0xADDR
+#     Where did the issuer's tokens go, and what still sits still? (a sieve: it sweeps
+#     airdrop recipients in at hop two — read members by balance, not by count)
+python lineage.py --db t.db closure --roots 0xSAFE1,0xSAFE2 --terminals terms.json
+
 # L5  Keys. Safes that share signers are ONE controller, not several holders.
 python control.py safes --chain bsc --token 0xTOKEN --float <float> 0xSAFE1 0xSAFE2 ...
 python control.py lock  --chain bsc 0xVESTING          # EFFECTIVE lock, not nominal
@@ -120,7 +142,11 @@ python venues.py --chain bsc --token 0xTOKEN --quote-price WBNB=<usd>
 #   Stables and wrapped native are swept without being asked for; --quote 0xADDR adds
 #   one. Quotes with no USD price are EXCLUDED from the share basis and listed — a pool
 #   holding 70M units of a microcap once ranked first at 99.5% by face value.
-#   Exit 2 on: share below the threshold, any refusal, any unpriced or unread pool.
+#   Exit 2 on: share below the threshold, any refusal, any unpriced or unread pool,
+#   or a singleton manager whose pools it cannot see.
+#   A "SINGLETON manager" line means pools the sweep cannot see (pitfall #37):
+python v4pools.py --chain bsc --token 0xTOKEN --manager 0xPOOLMANAGER --from-block <lo> --to-block <hi>
+#   prints a proved PoolKey and a ready depth.py line per pool.
 
 # L7b  Did the book change during the window you are about to describe? Census with NO
 #      topic filter and bucket by topic0 — a fork's Swap topic is not Uniswap's, and a
@@ -147,6 +173,11 @@ python attribute.py --tiers audit.json --out run1.json
 python attribute.py --tiers audit.json --diff run1.json     # what moved since
 #   close() fails on any gap or double count and prints "Nothing above this line may
 #   be published". The headline is a RANGE; D and M sit outside it by construction.
+
+# Deliver. Always this shape — see "The Deliverable" below.
+python report.py new   --out body.html --name NAME --chain bsc
+python report.py check --body body.html
+python report.py build --body body.html --title "NAME 筹码追踪" --out-dir out/ --pdf NAME-筹码追踪-<date>.pdf
 ```
 
 Run L0 and the privilege audit before anything else. Either one can make the rest
@@ -270,7 +301,61 @@ summed across every venue L7a enumerated** — and say how many venues that was.
 
 For concentrated-liquidity math and the depth simulator: [references/v3-depth.md](references/v3-depth.md).
 
-Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/balances.py](scripts/balances.py) (exact rebuild + the float denominator), [scripts/control.py](scripts/control.py) (Safe signer intersection, effective lock period, cross-chain supply), [scripts/positions.py](scripts/positions.py) (V3 liquidity attributed to its real owners), [scripts/attribute.py](scripts/attribute.py) (the tier table and the closure gate), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check; also Pancake Infinity and Uniswap V4 singleton pools).
+Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above), [scripts/privileges.py](scripts/privileges.py) (selector extraction + live-control proof), [scripts/rpc.py](scripts/rpc.py) (rotating multi-endpoint JSON-RPC with batching), [scripts/replay.py](scripts/replay.py) (parallel event replay → SQLite, with the coverage gate and the supply identity), [scripts/balances.py](scripts/balances.py) (exact rebuild + the float denominator), [scripts/control.py](scripts/control.py) (Safe signer intersection, effective lock period, cross-chain supply), [scripts/positions.py](scripts/positions.py) (V3 liquidity attributed to its real owners), [scripts/attribute.py](scripts/attribute.py) (the tier table and the closure gate), [scripts/lineage.py](scripts/lineage.py) (weighted provenance), [scripts/depth.py](scripts/depth.py) (V3 profile + sell simulator in both directions + structural self-check; also Pancake Infinity and Uniswap V4 singleton pools), [scripts/v4pools.py](scripts/v4pools.py) (V4 pools holding the token, PoolKeys proved), [scripts/funding.py](scripts/funding.py) (header times, gas funders, quote-asset flow, wallet rotations), [scripts/labels.py](scripts/labels.py) (shared labels, re-verified live), [scripts/report.py](scripts/report.py) (the fixed-shape deliverable).
+
+## The Deliverable
+
+Every audit ends in the same three files, built by `report.py build`: `report.html`,
+`report-print.html` (A4, light) and `<TOKEN>-筹码追踪-<date>.pdf`. A free-form Markdown
+write-up is a working draft, never the deliverable — reports on two tokens must read side
+by side, and the parts that matter most are the parts free-form write-ups drop.
+
+The shape (`assets/report/skeleton.html`; `report.py check` enforces it):
+
+1. Masthead — one paragraph: control range, the decisive flow fact, exit depth, and what
+   this version retracts.
+2. Stamp — 当前口径 (what was double-checked, whether independent review ran, the run
+   file), 快照 (block + UTC from the header), 现价 (from `sqrtPriceX96` at the snapshot),
+   数据底座 (certification line).
+3. 结论 — five numbered points.
+4. Numbered sections whose `h2` is a conclusion sentence, not a topic.
+5. 三个数，三个问题 — the three exit numbers, plus the venue table with its method.
+6. 每条结论的来源 — two sources per conclusion, single-source ones marked — and
+   本轮被推翻的我自己的说法: every retraction, including from interim messages.
+7. 什么时候这份报告作废 — the concrete events that invalidate each section.
+
+Rules carried from past audits:
+
+- **Write corrections back in the same round.** A review that overturns a figure and
+  leaves the report unchanged means the reader keeps acting on a known-wrong number,
+  under a "reviewed" label. After any correction, grep the deliverable for the retracted
+  figure and expect zero hits outside the corrections list.
+- **Name files by date or version, never "final".** One project had three generations
+  all called final.
+- **Every pool and balance at the snapshot block** (`--block`), never `latest`; a depth
+  figure read at latest moved by a few percent and had to be retracted.
+- Prose follows the reader's language; the shape does not change.
+
+## Endpoint and venue notes
+
+Measured, and dated by being measured; re-qualify before relying on any of it.
+
+| Need | BSC provider | Caveat |
+|---|---|---|
+| Historical logs, full history | nodereal public key | concurrency ceiling around two workers; a usage QUOTA a full replay can exhaust; 50k block / 50k result caps, both explicit |
+| Historical logs, recent | blxrbdn | rolling window of roughly four million blocks behind head, `header not found` below; 5k-block cap; far faster inside the window |
+| Cross-check | blockrazor | 25-block cap, about two months back |
+| Past-block `eth_call` | blastapi (free) | true archive for calls, refuses `eth_getLogs` |
+| Latest state | dataseed / publicnode / drpc | pruned: state older than ~128 blocks fails as "missing trie node" |
+
+- **Deploy-block bisection uses archive endpoints only.** A pruned node answers a past
+  `eth_getCode` with `0x`, not an error, and a mixed pool converges silently on a block
+  that is too late: the replay then misses the mint, shows hundreds of negative balances
+  and a supply gap — every intermediate step having "succeeded".
+- **A singleton's balance is every pool's reserve.** A V4 PoolManager or Infinity Vault
+  holding thousands of BNB says nothing about one pool's depth; only the tick profile
+  (or an aggregator quote, as a cross-check) does. Aggregator `liquidity.usd` fields are
+  never sellable depth.
 
 ## Common Mistakes
 
@@ -293,3 +378,8 @@ Reusable tools: [scripts/scan.py](scripts/scan.py) (the three-number pass above)
 | Calling an intermediary a shell because issuer tokens passed through it | It was a public MEV router handling other tokens in the same period, and the cumulative figure quoted was its lifetime total, not this episode's |
 | Reporting assumed attribution as fact | One rebuttal discredits the whole analysis |
 | Quoting market cap without depth | The headline risk number is off by orders of magnitude |
+| Converting a block timestamp to a date in your head | Three claims landed on the wrong day; read the header (`funding.py when`) |
+| Reading an exchange's wallet rotation as a deposit | A housekeeping sweep became a "pre-pump deposit"; count distinct tokens moved first |
+| Ranking a V4 PoolManager as a buyer | It receives the token when people SELL into V4 pools; four pools stayed hidden |
+| Quoting total pool TVL as depth when a bid sits near zero | The displayed liquidity was mostly a position no realistic sale reaches |
+| Shipping a free-form write-up | Reports stop being comparable and drop the three exit numbers and the corrections |

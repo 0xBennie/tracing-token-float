@@ -622,7 +622,7 @@ class V4Pool(SingletonPool):
 
 if __name__ == "__main__":
     import argparse, json
-    from rpc import Client, BASE, BSC, ETH
+    from rpc import Client, BASE, BSC, ETH, ARCHIVE_EPS
     NETS = {"base": BASE, "bsc": BSC, "eth": ETH}
     p = argparse.ArgumentParser(description="V3 liquidity profile + sell simulator")
     p.add_argument("--chain", required=True, choices=list(NETS))
@@ -640,10 +640,15 @@ if __name__ == "__main__":
     p.add_argument("--sell", type=float, nargs="*", default=[10_000, 100_000, 1_000_000])
     p.add_argument("--token1", action="store_true",
                    help="the token you are selling is the pool's token1")
-    p.add_argument("--block", help="hex block to pin to (needs an archive node)")
+    p.add_argument("--block", help="block to pin to, decimal or 0x-hex. Read through the "
+                                   "ARCHIVE pool: the general pool is pruned and answers a "
+                                   "past block with 'missing trie node'")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
-    cli = Client(NETS[a.chain])
+    if a.block:
+        # positions.py takes a decimal block and this took hex; accept both, pass hex on.
+        a.block = hex(int(a.block, 16) if str(a.block).lower().startswith("0x") else int(a.block))
+    cli = Client(ARCHIVE_EPS[a.chain] if a.block else NETS[a.chain])
     if a.pool:
         pool = Pool(cli, a.pool.lower(), a.dec0, a.dec1, block=a.block)
     elif not a.manager:
